@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-11 Australia/Sydney",
+  "evidence": "STATIC saved-file snapshot; runtime consumption not observed",
+  "files": [
+    {
+      "source": "E:\\Games\\Steam\\steamapps\\common\\Batman Arkham Origins\\SinglePlayer\\BMGame\\Config\\BmEngine.ini",
+      "snapshot": "BmEngine.ini",
+      "sha256": "c896e85fc62aebfedba6a3d7d312f9efad44f9ddb73ccf225d331199592b0adc",
+      "bytes": 150724
+    },
+    {
+      "source": "D:\\Documents\\WB Games\\Batman Arkham Origins\\GFXSettings.BatmanArkhamOrigins.xml",
+      "snapshot": "GFXSettings.BatmanArkhamOrigins.xml",
+      "sha256": "08332349f61c09cdbacce8d2956bec598081cdc1a641a955c98d0da40b90ec4e",
+      "bytes": 5968
+    }
+  ],
+  "saved_graphics_options": {
+    "Fullscreen": "true",
+    "ResolutionX": "2560",
+    "ResolutionY": "1440",
+    "VSync": "false",
+    "AntiAliasing": "TXAA High",
+    "GeometryDetail": "DX11 Enhanced",
+    "DynamicShadows": "DX11 Enhanced",
+    "MotionBlur": "false",
+    "DepthOfField": "DX11 Enhanced",
+    "Distortion": "true",
+    "LensFlares": "true",
+    "LightShafts": "true",
+    "Reflections": "true",
+    "AmbientOcclusion": "DX11 Enhanced",
+    "HardwarePhysX": "High"
+  }
+}

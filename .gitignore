@@ -1,0 +1,23 @@
+build/
+build64/
+dist/
+__pycache__/
+# Private captured game animation for JJ's local development install.
+assets/bat-wipe.bin
+
+# Reverse-engineering workspace: game packages, Ghidra projects and backups of game files - never upload
+/re/headless/
+/re/backups/
+/re/evidence/
+/re/build-check/
+/helper64/build*/
+*.pdb
+*.dll
+*.exe
+*.lib
+*.obj
+*.ilk
+*.exp
+*.log
+*.bmp
+*.upk

@@ -1,0 +1,4 @@
+LIBRARY batman_origins
+EXPORTS
+    BO_StartProbe=_BO_StartProbe@0
+    BO_ProbeIdentity=_BO_ProbeIdentity@0
