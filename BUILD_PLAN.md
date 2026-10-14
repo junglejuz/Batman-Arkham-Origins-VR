@@ -704,3 +704,470 @@ Installed, hash-verified.
 | 4 | menu drawn into the eye pictures | the HUD layer is the copy | copy gone; captures show the menu in the eyes |
 Follow-ups: 2 → use one quad for menus (HUDMENU signal from the map-screen detector); 3 → draw the
 HUD sheet once per pair; 4 only → inspect HUD layer placement / re-anchoring on sheet gaps.
+
+### MT1 RESULTS (15:36-15:37, run twice by JJ in the headset)
+- HEADSET (JJ): **none of the four steps removed the copy.**
+- LIVE: all steps logged and restored. Control/step 2/step 3 eye pictures are EXACTLY black (0 non-black
+  pixels); step 4 eye pictures each hold one clean menu; 8 consecutive HUD sheets identical (diff 0.0-0.03).
+  Bats layer idle (generated stays 577), cinematic quad only while opening, no mono presents (2 presents
+  per pair), letterbox verdict only acts in flat-screen mode.
+- Conclusion: what we submit is one menu (quad or in the eyes) over black; the skewed copy is not in our
+  eye images or HUD sheet. Remaining: another of our layers (panel, laser/aim dots, vignette), or the
+  compositor/Virtual Desktop (e.g. its frame synthesis/reprojection on an all-black frame).
+- Next: a Quest screen recording of the database (shows the composited headset view), plus: does the
+  copy stay fixed in the room or move with the head; is it also in the pause menu.
+
+### MT1 follow-up — cause found: EARLYUI (2026-10-11)
+JJ: SSW is off (frame synthesis ruled out); the copy is "outside what the game drew". Projection layer is
+opaque (no alpha flag). **LIVE (log arithmetic):** eye renders vs scene boundaries found per 5 s: gameplay
+0 missed; in the database 2-20 missed per 5 s (~2-4 eye passes/s). In a pass with no boundary the menu is
+not redirected and is drawn into that eye picture at screen pixels (head-locked, off-centre lens) = the
+flickering skewed copy; matches the 25/1500 gaps in the HUD frame record. Captures never caught one
+(they sample single frames). Step 4 of MT1 put the menu in the eyes every frame, so it could not remove it.
+**SOURCE EARLYUI** (core `gfx_hud.cpp` classify): in an eye pass (redirect on), a backbuffer draw before
+any scene blit starts the UI run provisionally; if the scene blit still arrives in that pass, the capture
+is cleared and the blit goes to the eye (stock-equivalent: the full-screen blit covers earlier draws).
+Switch `bo earlyui on|off`, panel HUD checkbox, default on. Status line: passes caught / blit came later.
+BUILD-OFFLINE: 3 CTests pass. DEPLOYED, hash-verified. **HEADSET: pending** - open the database: copy gone;
+status "caught" rises only in menus; gameplay HUD unchanged ("blit came later" may count, harmless).
+- **EARLYUI v1 HEADSET (JJ 16:55): black headset entering the game from the menu.** LIVE: during the
+  load 164 presents per 5 s came WITHOUT an eye pass (loading screen) while the redirect flag still held
+  the last eye pass's "on": EARLYUI caught 162 of them = the loading screen went into the HUD sheet. In
+  gameplay it caught 6, all undone by the later blit (correct). **v2 SOURCE:** EARLYUI also requires an
+  open eye pass (`gfx_hud::note_eye_pass` from BeginDrawing, cleared at Present). Built, CTests pass,
+  installed hash-verified. HEADSET pending: loading screen visible, database copy gone, gameplay HUD same.
+  Lesson: a per-pass decision must key on a per-pass flag, never a sticky one.
+
+## TEST PLAN MT2 - map grid still flashing outside the map window (EARLYUI v2), JJ video 2026-10-11
+
+Looked up: MT1 / EARLYUI notes above (same symptom, same session); VR_ESSENTIALS §6 (HUD redirect; one
+decision per pass); the video `temp/Origins_Map_Flicker.mp4` (Quest recording of the map, 33 s).
+**HEADSET (video):** the flash is NOT a copy of the whole menu: single frames show a large full-view
+cyan/red grid to the left of the map window, nothing else (frame at ~10 s). About 13 visible flashes in
+33 s (the 30 fps recording sees one in three headset frames, so ~1/s). **LIVE (log 16:57-16:58):** in the
+map, EARLYUI "caught" rose ~3/s and "blit came later" ~1-2/s; in gameplay "blit came later" is ~0.
+**Cause (SOURCE):** the map's 3D grid is a backbuffer-size render target drawn by one full-screen quad,
+so it passes `is_boundary_blit`. In a provisional pass, that quad was taken as "the scene blit came
+after all": the menu pieces so far were cleared and the grid went into the eye picture at screen
+pixels (head-locked, off-centre lens) = the flash.
+**SOURCE EARLYSTRICT** (`gfx_hud.cpp`): the scene blit's source picture is learnt from ordinary passes
+(blit before any UI, ring of 8, each new one logged); the undo needs that same picture; any other
+full-screen picture stays on the menu sheet (logged up to 8). `bo earlystrict on|off`, panel HUD
+checkbox, default on; status adds "full-screen pictures kept as UI". BUILD-OFFLINE: 3 CTests pass.
+DEPLOYED: hash-verified, dll SHA-256 CBBB97BD...5D3DA2. **HEADSET: pending.**
+
+| # | command / switch | what it proves | how to judge |
+|---|---|---|---|
+| 1 | gameplay 20 s, status | learning works, gameplay unchanged | "scene blit source picture" logged (1-2 pictures, eye size); "kept as UI" stays 0 |
+| 2 | open the map 30 s | the fix removes the flash | JJ: no grid outside the map window; "kept as UI" rises ~1-2/s, "blit came later" stops rising |
+| 3 | `bo earlystrict off` 15 s, then `on` | the switch is what changes it | off: flashes return; on: gone |
+| 4 | database, pause menu, a load, back to gameplay | no side effects | loading screen visible, HUD normal, no scene picture on the menu sheet |
+
+Prepared branches: flashes remain while "kept" rises → a second escape route (the grid as the FIRST
+full-screen draw of a pass = learnt as "scene"): check the logged source list for a second picture
+during the map and require the scene picture to be the one seen in gameplay; "kept" stays 0 in the map →
+the map grid uses the scene's own buffer: then discriminate by blend state / pixel shader instead.
+
+### MT2 RESULTS run 1 (17:09-17:10, JJ, HEADSET: "still happening"; City has a similar leftover)
+- LIVE: only ONE scene source learnt (1328x1424 fmt 10); in the map "blit came later" still rose (3 -> 8)
+  with "kept as UI" 0 = the late blit samples the scene's OWN picture. The map grid is rendered into the
+  scene picture and blitted again; source identity cannot separate it. Negative result recorded.
+- **SOURCE EARLYSTRICT v2:** in ordinary passes a second scene-picture blit after the boundary marks a
+  map-type screen (counter "second scene blits"); for 1 s after one, OR while the MAPSCREEN detector says
+  the map is up (big untextured shapes, 1.5 s hold, now shared), a late scene blit in a provisional pass
+  stays on the menu sheet (reason logged). BUILD-OFFLINE 3/3 CTests; DEPLOYED hash-verified. HEADSET pending.
+- Judge: map 30 s, no flash; status "kept as UI" rises in the map, "blit came later" stops rising there;
+  "second scene blits" > 0 in the map, 0 in gameplay; `bo earlystrict off` brings the flash back.
+- Branch: kept rises but flash remains → a third route; next tool: a per-pass log of every backbuffer
+  full-screen draw in the map (source, blend, order) for 2 s.
+- City (no EARLYUI at all): port EARLYUI v2 + EARLYSTRICT v2 once Origins is confirmed.
+
+### MT2 RESULTS run 2 (17:21-17:22, JJ HEADSET: "still flickering outside the window"; JJ: "did you reference the City fix?")
+- LIVE: "second scene blits" 4-6 total (none while the map was steady), MAPSCREEN up from 17:22:04, and only ~1
+  undo in the steady map, yet the flash stayed = the undo route is NOT the main cause. Two fixes failed ->
+  looked up again (SESSION_START rule).
+- **Looked up again:** City BATMAN_CITY_PLAN "PANELMAP / MAP2 / MAP3 / MAPSCREEN / MENUOPEN / OPENFADE" (City's map
+  flicker "outside the bounds" was transition rules sending untextured map pieces into the eye; City has no EARLYUI);
+  Origins log: zero "wipe starts" lines in the map (those rules did not fire here); status: tag-miss 0, root =
+  second and begin = presents in the steady map (both eyes, every pass labelled); DLSS input = the backbuffer at
+  present (dlss_bridge ov_send), so DLSS only carries what is already on the backbuffer; playbook
+  symptom/failure grep "single-frame flash / stale input": nothing relevant.
+- Conclusion: no counter identifies the route; stop patching blind. **SOURCE LEAKTRACE / MAPTRACE**: panel HUD
+  "Map flicker recorder (20 s, open the map first)" / `bo maptrace`. 3 s delay, then one line per present
+  (eye pass, sign, events B boundary / P provisional / U undo / K kept / S second blit, draws to sheet / hidden /
+  eye / pre-boundary eye, the eye-bound draws listed with count and texture size) and an objective eye check:
+  four full-width strips of each eye picture read back (lit pixels in the map = leak), first 4 leaking eye
+  pictures saved whole. Steps: normal 10 s, EARLYSTRICT off 5 s, EARLYUI off 5 s, restore; log leaks per step.
+  Files `captures\maptrace_<time>\leaktrace.txt` + `leak_p*.bmp`. BUILD-OFFLINE 3/3; DEPLOYED.
+- Branches: leaks = 0 while JJ sees flashes -> not our eye picture (compositor / another of our layers: check
+  the room screen / cinematic quad / bats layer timing); leaks > 0 -> the leak line names the draw (pre:/eye:)
+  and its decision events -> fix that route; the saved bmp shows what leaked.
+
+### MAPTRACE RESULTS 17:37 (JJ pressed the recorder on the map) -> MAPBLIT
+- LIVE (objective): 176 of 4998 eye pictures leaked (63 in 10 s normal, 40 with EARLYSTRICT off, 41 with EARLYUI
+  off = those switches do not matter). ALL 176 in eye sign 1. In every leaking present all HUD draws went to the
+  sheet (eye 0, pre-eye 0): the only eye draw was the boundary scene blit. Saved pictures (colour only): the
+  map's grid background with its blue glow (lit ~8870 px in the strips) and the floor-plan shape (lit 1992).
+  = the map art is drawn into the shared scene picture and sometimes is already there at this eye's FIRST
+  blit (left by the other eye's pass), so it went full-view into the eye. The trace's "eyepass" column reads
+  0 always (written after the flag is cleared: recorder artefact, ignore).
+- **SOURCE MAPBLIT:** at the boundary, while MAPSCREEN says the map is up, the eye is cleared black and the
+  blit goes on the sheet (as the map's later blits already do). `bo mapblit on|off`, panel checkbox, default
+  on, status counter. The recorder now runs normal 10 s / MAPBLIT off 5 s / normal 5 s. BUILD-OFFLINE 3/3,
+  DEPLOYED 04009A8E...FA215E. HEADSET + recorder pending. Same fix ported to City (BATMAN_CITY_PLAN "MAPBLIT").
+
+## MAPFLAT - why four map fixes failed, and the structural fix (2026-10-11 evening; JJ: City + Origins "same issues still")
+**Looked up again** (two+ failed fixes, SESSION_START rule; new words "full-screen UI state", "everything else once"):
+playbook @ b955f224 `docs/symptom-index.md` l.342 "HUD or menus drawn twice, or doubled in one eye" -> `17` #side-effect-gate
+("render the world twice, everything else EXACTLY once" + the third class "overwritten between write and read"), l.379
+"full-screen UI misclassified" -> `04` "Find the engine's authoritative UI state instead of inferring it" (proxies fail on
+different content types; find the game-state field); City scene.cpp MENUCLOCK (clock signal, lags up to 7 s, City only).
+**What we missed (LIVE, batman_origins.prev.log 17:51-18:15, MAPBLIT build):**
+1. MAPBLIT never acted on the real map. Map open ~18:07:29-18:07:54: "second scene blits" 20 -> 153, EARLYSTRICT kept 7
+   with reason "second scene blit seen recently" (never "map screen up"), MAPBLIT stuck at 162 the whole time.
+2. The MAPSCREEN detector (untextured shape >= 2000 indices) is the wrong signal: its only firing (17:51:35, 2103 indices)
+   was the menu -> game bat transition, and City's log fires on the same 2103-index shape at its main menu -> game wipe.
+   Origins' map draws no such shape. Every map fix keyed on it (MAPBLIT, EARLYSTRICT "map screen up") was off in the map.
+3. Origins never tells the shared HUD code that a menu is up: `set_hud_zones_gameplay` / `set_hud_menu_now` are never
+   called from the Origins adapter (grep), so `g_zonesGameplay` stays true = every menu runs the GAMEPLAY rules.
+4. Root cause of the leak itself (MAPTRACE 17:37): the doubled viewport draw runs the map's own drawing per eye; one pass
+   leaves the map art in the shared scene picture and the other eye's scene blit puts it full-view in the eye. The map has
+   no 3D world, so it should not be rendered twice at all (playbook 17: everything except the world exactly once).
+**Plan MAPFLAT (both games, port by code shape):** (a) an authoritative "full-screen menu/map is up" state from the game:
+log Scaleform movie open/close (UE3 GFxMoviePlayer Start/Close or the game's own menu manager) with names, pick the map /
+database / upgrade / pause entries; (b) while it is up: no second render (no doubling, plain flat camera), the WHOLE
+backbuffer frame goes to the menu screen in one pass, eyes black; (c) Origins adapter sets zones-gameplay / menu-now from
+the same state. Interim fallback switch: drive MAPBLIT from "second scene blit seen" (rose only in the map) as well.
+Verify with the existing recorder (MAPTRACE): leaking eye pictures 0 in the map; control step (MAPFLAT off) > 0; JJ sees no
+copy; pause menu, database, upgrade screen, loading and gameplay HUD unchanged. HEADSET: pending.
+### MAPFLAT step 1: MENUSTATE probe (2026-10-11 ~22:40)
+SOURCE: `src/game/origins/menu_state.cpp`, port of City's: the game's menu natives found BY NAME in the live native
+table (the Origins exe holds no "<Class>exec<Func>" strings on disk - offline extraction found 0 while the same script
+reproduces City's 2630; they appear only once the game runs), hooked on a worker thread, every call logged with the
+movie's class/object name (GNames found live). Status line per 5 s; `bo menuprobe`. No behaviour change.
+STATIC: Release built clean, CTests 3/3, installed + hash-verified (4059C89A6B47F9E9..., receipt updated), backup
+re/backups/before-menustate. LIVE/HEADSET pending.
+| # | JJ does | judge |
+|---|---|---|
+| 0 | launch, into gameplay | log "N of 16 menu natives hooked" (0 = Origins class names differ: list them from the strings) |
+| 1 | pause / unpause; map open / close; database open / close | MENUSTATE lines name each screen's open and close |
+Next: MAPFLAT keyed on that signal (no doubled render + whole frame on the menu screen while the map is up).
+MS2 (same evening): menu_state ported again from City's MS2 (menu open / closed tracking logged, name table page scan +
+UTF-16 + retry). Installed, CTests 3/3, receipt updated (C320E2885F6E426C...). City MS1: the probe found the pause / map /
+upgrades signals (BATMAN_CITY_PLAN "MS1 RESULTS"); Origins' own run still pending.
+### MS3: MAPBLIT on the game's own menu signal (2026-10-11 ~23:2x)
+City result (HEADSET, JJ, runs 22:39 + 22:51): the copy outside the map / upgrades window is gone. City's fix = MAPBLIT
+(on the map the eye is cleared black and the scene blit goes on the menu sheet; MAPTRACE 17:37 cause: the map art left in
+the shared scene picture by the other eye's pass) + MAPBLITTAIL. Origins already had MAPBLIT, but its trigger never fired
+on Origins' map (above). MENUSTATE names (City 22:51): pause = RGFxMovieUI_Pause, map / upgrades = RGFxMovieBackScreen.
+SOURCE: menu_state tracks each open menu's class; "screen menu" = open and not pause-type (not "Pause" in the class, no
+RestoreMenuState); HUD classes (Hud / FrontMost) never count. gfx_hud MAPBLIT source 1 (default) = that signal (set per
+CalcSceneView by the adapter), 0 = the old shape detector (`bo mapblit src 0|1`); EARLYSTRICT "map type" also on it;
+`bo menureset` clears a stuck state. STATIC: built clean, CTests 3/3, installed + receipt (E3AC869DD1942B19...), backup
+re/backups/before-menustate/batman_origins.ms2.dll. LIVE/HEADSET pending.
+| # | JJ does | judge |
+|---|---|---|
+| 1 | gameplay 10 s | log: "N of 16 natives hooked", name table found; no "menu signal ON" in gameplay |
+| 2 | open the map, look at the edges 15 s; panel "Map flicker recorder" while it is up | no copy; log "menu OPEN <class>" + "MAPBLIT menu signal ON"; recorder: leaks 0 in normal steps, > 0 with MAPBLIT off |
+| 3 | close the map | signal off at once; no 2D gameplay picture on the menu screen |
+| 4 | database, pause menu | database clean; pause unchanged (pause is not a screen menu) |
+- MS3 install fix (2026-10-11 ~23:3x): the launcher checks `<Win32>\originsvr_manifest.json` (not re/evidence) - the MS1-MS3 installs had not updated it, so Launch-VR refused ("Installed file differs"). Updated to E3AC869D...; every manifest file re-checked OK; backup re/backups/before-menustate/originsvr_manifest.json.
+### MS3 RESULTS (23:17-23:18, JJ HEADSET: "still getting the flickering outside the map screen") -> MS4
+- LIVE: name table found (5965 names, ANSI +0xC) but "0 of 16 menu natives hooked": every "<Class>exec<Func>" search
+  found 0 strings. Origins has NO name-based native table (not on disk, not live) - City does. So the menu signal never
+  came and MAPBLIT never switched on: the run was the old state. Lesson: a build whose fix depends on a signal must say
+  loudly when the signal is missing (now logged: "NO menu functions hooked - the menu signal is OFF").
+- SOURCE MS4 (menu_state, both games; Origins uses it, City keeps its table route): the UFunction route - GObjects found
+  live (the TArray whose objects resolve Name / Class / Class->Class = "Class"); the function objects named Start / Close
+  / SetFocus ... whose owner (the pointer before Name, checked against "GFxMoviePlayer") is the class; Func = the offset
+  where >= 95 % of 1500 Function objects hold a code pointer and >= 30 % share one value (script ProcessInternal); the
+  hook swaps that one function object's Func (data write, no code patch). Retried every 3 s for 2 min.
+- STATIC: built clean, CTests 3/3, installed; game-folder manifest + receipt updated (6ABFEEE233967249...), launcher check
+  re-run: passes. Backup re/backups/before-menustate/batman_origins.ms3.dll. HEADSET pending.
+- Judge: log "object list at", "function code pointer at +0x..", "N menu functions hooked through their function
+  objects", then "menu OPEN <class>" + "MAPBLIT menu signal ON" when the map opens; JJ: no copy at the edges.
+### MS4 RESULTS (23:22-23:24, JJ: map still flickers; JJ quit normally, WM_CLOSE, no fault) -> MS5
+- LIVE: object list found (137282 objects, name +0x1C, owner +0x18); "code pointer" taken at +0xA0 because the code
+  range was the whole image: 013CC348 (shared by 1399/1500) is in .rdata, not .text. 14 of 16 then "not native"; two
+  were "hooked" = our detour written into a NON-code field of RPlayerController.GetActiveFocusMovie / SetRegularGame
+  PauseFlag (+0xA0 held 5C801C0B / 1F1CB460; the second was rewritten to 0 by the game). Live repair: the first field
+  restored (ReadProcessMemory showed 59263AF0 = our DLL) - the process had already exited. No crash. Rolled the install
+  back to MS3 (no hooks) at once.
+- SOURCE MS5: route A (preferred) = short per-class native tables { "execStart", impl } - a run of "exec*" entries is
+  used for a class only if it holds all of the class's anchors (GFxMoviePlayer: Start, Close, SetFocus; ...) and is the
+  only such run; code hooks + shared-stub check as City. Route B (fallback) = function objects with the real .text
+  range (script value and target values must be in .text). Read-only evidence: which words of GFxMoviePlayer.Start
+  point into code. STATIC: built clean, CTests 3/3, installed D27F868742F925CB..., manifest + receipt, launcher check
+  passes. HEADSET pending.
+### MS5 RESULTS (23:28-23:29, JJ: still flickers) -> MS6
+- LIVE: no short "exec<Func>" tables either (all four groups "not found"). Function objects found (owner +0x18);
+  GFxMoviePlayer.Start object code words: +0x88 = 00BB2260, +0x128 = 00BB2340. STATIC (capstone, installed exe):
+  0xBB2260 = execStart thunk (reads the optional bool via GNatives 0x1812C10, then calls on); 0xBB2340 = the same shape
+  with a float = the NEXT function object's +0x88 (objects 0xA0 apart). => Func at +0x88. The 95 % rule never matched.
+- SOURCE MS6: Func offset = the single offset where Start, Close and SetFocus all hold distinct .text addresses (else
+  no hooks, logged); pointer swap per function object. Built clean, CTests 3/3, installed 9A7B46E615C212D9..., manifest
+  + receipt, launcher check passes. Expected log: "function code pointer at +0x88 (Start / Close / SetFocus: 00BB2260 ...)".
+### MS6 RESULTS (23:32-23:35, JJ HEADSET + LIVE) -> MS7
+- LIVE: Func at +0x88 confirmed (Start / Close / SetFocus 00BB2260 00BB2430 00BB2BB0); 16/16 hooked through function
+  objects. Names: pause = RGFxMovieUI_Pause; the map = MGFxMovieControllerBackScreen + ...BackScreenTop + ...Map, opened
+  within 20 ms. MAPBLIT menu signal ON in the map, MAPBLIT count rose every pass.
+- HEADSET (JJ): copy still at the edges, "follows your face as your head moves". After the map: flat 2D (BUG: Origins
+  Closes Map + BackScreen but never BackScreenTop -> the screen-menu state stayed on -> MAPBLIT kept the eyes black and
+  the game on the menu sheet). Repaired live with `bo menureset` (4 menus dropped).
+- LIVE: EARLYUI "passes without the scene blit" rose ~2.7/s in the map (16 -> 70) - MAPBLIT acts only at the scene blit,
+  so those passes keep the eye's old content (head-locked, flickering) = suspect. The MAPTRACE run (23:34:36-56) ran while
+  JJ was in the PAUSE menu, not the map: its leak counts (0 / 788 / 1) do not answer the map question.
+- SOURCE MS7: menus opened within 300 ms close together; MAPBLIT2 = on a screen menu, a pass without the scene blit is
+  blanked too (counter in the 5 s MENUSTATE line). Built clean, CTests 3/3, installed 466E04DC3DFF3FCF..., manifest +
+  receipt, launcher check passes. Test: map + recorder IN the map; after closing, 3D (log "closed with it").
+### MS7 RESULTS (23:38-23:40, JJ HEADSET: "you've made it worse") -> MS8 = undo
+- HEADSET: copy still outside the window; the map "attached to the camera"; booting flips 2D / 3D / 2D / 3D.
+- LIVE: (1) the title chain (RGFxMovieUI_PressStart, Login, DLCScanning, StorageSelect, SaveSlotSelect, MainMenu) counted
+  as screen menus -> MAPBLIT signal ON / off while booting = the flips. (2) MAPBLIT2 blanked only 17 passes in 90 s of map
+  - not the copy. (3) ROOT MISREAD: Origins' map is a real 3D hologram rendered by the engine into each eye; MAPBLIT moved
+  it onto the flat sheet = "attached to the camera". The MAPTRACE leak check counted that legitimate 3D map in the eye as
+  a "leak" (176 / 788 leaks) - the instrument was wrong for Origins, and MAPBLIT is wrong for Origins.
+- SOURCE MS8: MAPBLIT default OFF in Origins (test only); screen-menu signal only for map-type classes ("BackScreen" /
+  "Map"); the probe and group-close stay (logging only). Built clean, CTests 3/3, installed 2C420E5DC677AF31...,
+  manifest + receipt, launcher check passes. Expected: boot and map as before tonight (copy still there).
+- The Origins copy is still UNEXPLAINED. Facts: head-locked, at the edges outside the map window, flickers ~1/s; the Quest
+  video frame (~10 s, temp/Origins_Map_Flicker.mp4) showed a cyan/red full-view grid left of the window. Next: an
+  objective per-eye picture burst in the map (consecutive eye pictures + HUD sheet) to find the frames that hold the copy,
+  then name their draws - before any further fix.
+
+## TEST PLAN EB1 - black window before the first menu + window-sized bats -> full view (EYEBATS / BOOTBLACK), 2026-10-13
+JJ: "a black window that appears after the title screen video and before the first menu screen ... needs to be removed";
+"Arkham City had the same issue. Same with the bat wipe transition screen. Needs to be enlarged to full FOV and brought
+closer to the camera".
+Looked up: VR_ESSENTIALS §6 (VD crops/smears lone quads; menus/fades into the eyes) and §2 City recipes; City
+BATMAN_CITY_PLAN WIPEREPLAY / WIPEFLIP / WIPEPANEL / BLACKFILL / MENUFADE (in-eye replay over the whole view, panel not
+sent while it plays; the game-start stage fill -> whole view black, JJ "perfect"); memory batman-city-hud-overlays;
+this plan O1F-O1H (head-relative quad layer, JJ O1G "window-sized"). Playbook b955f224 HUD-004 already cited in O1F.
+- LIVE (O1H log 23:47): logo skip 33.75 -> cinematic quad off 34.17 -> UI frames of only 1-2 UNTEXTURED draws until the
+  title's first textured UI at 35.64 (event_1 hud_last_frames) = Origins' full-screen black fill, shown on the floating
+  panel = the black window. Origins turned City's BLACKFILL off (scene.cpp: City classifiers not Origins evidence).
+- Cause of the window-sized bats: they were a separate head-relative quad layer; VD shows it as a window.
+- SOURCE fix: EYEBATS - the runtime calls the adapter's painter on every FINISHED eye image (after DLSS / held-left
+  finish / AFW warp / room screen); the bat recording is drawn over the whole eye (eye_enlargement 1.6 = City's in-eye
+  size), shifted per eye so both eyes fuse it on a plane straight ahead at the bat distance (0.8 m), correct for the
+  asymmetric lens. One playback step per XR frame (both eyes same picture). Quad layer no longer submitted. While the
+  eyes hold bats/black the floating UI panel is not sent (City WIPEPANEL); 1.5 s after, only its coloured UI.
+  BOOTBLACK - until the first menu (title-exit bat event, or 60 textured UI frames in the 3D view), a UI frame made of
+  ONLY untextured draws (3D view only, never during movies) makes the whole view black for 150 ms.
+- STATIC: built clean; CTests 3/3 incl. new WARP checks (eye shift moves the bats exactly; BOOTBLACK fills the whole eye;
+  a textured menu frame is not blackened). Installed batman_origins.dll 33D79327..., manifest + receipt updated, all 16
+  files verified. Backups: re/backups/before-eyebats (sources, installed DLL, manifest).
+
+| # | JJ does | judge |
+|---|---|---|
+| 1 | launch VR, skip the logos | no black window: whole view black, then the title screen; log "BOOTBLACK: ... whole view black", "BOOTBLACK done" |
+| 2 | press Start | bats reveal the title scene over the WHOLE view, no window; auto folder bat_layers_*_event_1 with eye_left/right.bmp |
+| 3 | main menu -> Continue | bats cover the whole view -> black over loading -> reveal; no panel window during it |
+| 4 | panel BAT TRANSITIONS: Bat distance / enlargement if wanted | both sliders live; eyes fuse the bats |
+| 5 | pause -> quit to menu | same full-view bats; HUD returns after |
+Follow-ups: bats look doubled -> distance slider (shift per eye); edges of the game's own bats show on the panel after
+the replay -> extend the 1.5 s coloured-only window; black window still there -> `bo bats status` + capture during it.
+- 2026-10-13 City TABRACE checked for Origins (JJ asked): NOT applicable. City's black Tab screen came from the HUD's
+  "gameplay" flag flipping to "menus" when the game clock stopped ~40 ms before the opening wipe. Origins never sets that
+  flag (no set_hud_zones_gameplay caller; g_zonesGameplay stays true), so its openings always count as from gameplay and
+  MENUFADE / in-menu holds never run. The Origins map copy is a separate, still-unexplained problem (above).
+- 2026-10-13 PANELMOUSE ported from City (JJ: City's overlay mouse works): overlay.cpp maps the QUEUED mouse events onto the
+  panel (no io.MousePos scaling), recursive lock around ImGui's input queue, dinput_block stills the game's DirectInput
+  mouse while the panel is open. Release built clean, CTests 3/3, installed via tools/Install-VR.ps1 (manifest updated),
+  batman_origins.dll 5B5DE7190613860C..., backup re/backups/before-panelmouse. Not run.
+- HEADSET (JJ 2026-10-13): PANELMOUSE "looks good in Origins".
+
+## TEST PLAN EYB1 - the map flicker, recorded objectively (2026-10-13; JJ: "the only annoying thing now with origins is the
+## flickering duplicate in the map/tab menu. We solved it for city, but it's persisting in origins")
+Looked up (again; 7 failed fixes on 2026-10-11): this plan MT1 / MT2 / MAPTRACE / MAPFLAT / MS3-MS8; memory
+arkham-map-flicker-wrong-signal (City's fix MAPBLIT is WRONG for Origins: its map is a 3D hologram drawn into each eye);
+VR_ESSENTIALS §2 (anything cached on game time must refresh per eye and while paused - PERCAPTURE / PAUSEREFLECT; Origins'
+reflect.cpp hooks only the reflection probe class, RE_NOTES "Reflection probe", so it says nothing about the map); City
+TABRACE (does not apply: Origins never sets the gameplay flag). Video temp/Origins_Map_Flicker.mp4 re-read frame by frame
+(scratchpad): flash frames differ from both neighbours while the neighbours match; no clean shift of the window, the text
+looks doubled - one eye's video at 30 fps under compression cannot name the cause.
+LIVE (today 17:02, 1.5 s in the map): presents 891 = pairs 446 x 2, root = second = 445 per 5 s -> every map present is a
+tagged eye present with both eyes rendered; the flicker is INSIDE the eye pictures (not untagged presents).
+Ranked causes: (1) the other eye's map art reaches this eye (a shared picture written in one eye's pass, read in the
+next - MAPTRACE 17:37 saw map art in eye-1 scene blits); (2) an off-screen picture of the map refreshed on game time /
+frame number (clock stopped in the map), drawn from one eye's view and used by both; (3) a pass whose picture is not
+this eye's at all (a stale / skipped pass).
+SOURCE EYEBURST (core vr/eye_burst.cpp, wired at the eye present before anything is painted in): `bo eyeburst N`
+records N presents - a 1/4-size copy of the window picture (= what goes into that eye) and of the HUD sheet (= the menu
+layer) per present, plus index.txt (seq, time, eye sign, pose generation, AFW, EARLYUI / second-blit / MAPBLIT
+counters). Staging ring of 4, read 4 presents later (no GPU stalls). Files captures\eyeburst_<time>\.
+tools\eyeburst_view.py <folder>: per eye, a flash = differs from that eye's previous AND next picture while those match;
+flashes.txt ranked + flash_<seq>_<eye|hud>.png (before / flash / after / the other eye nearest in time; HUD sheet below).
+Tested on synthetic data (planted flash found, score 59). STATIC: built clean, CTests 3/3, installed via Install-VR.ps1
+0C485C49BD92FFE9..., backup re/backups/before-eyeburst.
+| # | JJ does | I send | what it proves | how to judge |
+|---|---|---|---|---|
+| 0 | launch VR, load into gameplay, "ready" | - | install | log "[bo]" status lines |
+| 1 | stand still in gameplay 5 s | `bo eyeburst 360` | control | flashes.txt: top scores small (< 2), no flash pictures |
+| 2 | open the map, look at the window edges, keep still, say "in map" | `bo eyeburst 540` | the flicker in the record | flashes > 2 in eye or hud; JJ: saw flickers during the 3 s |
+| 3 | stay in the map | `bo stereo off`, `bo eyeburst 360`, `bo stereo on` | the doubled render is the route | stereo off: no flashes -> cause (1)/(3) |
+| 4 | stay in the map | `bo afw on`, `bo eyeburst 360`, `bo afw off` | one eye drawn per frame | AFW: no flashes -> the second render's side effect |
+| 5 | upgrades tab of the same screen | `bo eyeburst 360` | 3D map vs flat tab | flashes only with the 3D map -> the map render |
+Follow-ups: flash picture = the other eye's map (matches the 4th column) -> cause (1): find the shared picture (frame
+dump of one flash pass); flash = same eye's older map -> cause (2)/(3): read the pose generation column (repeat / jump);
+flash only on the HUD sheet -> the menu layer, not the eyes.
+### EYB1 reworked as ONE PANEL BUTTON (JJ: "I can't work interactively with you while I'm in the headset" - VR_ESSENTIALS §1)
+- SOURCE MAPTEST2: panel HUD -> "Map flicker test (30 s, open the map first)" (replaces the old MAPTRACE button; `bo
+  maptest2` too). 4 s to close the panel, then 4 steps, each: switch, 1.5 s settle, EYEBURST record (540 / 360 / 360 /
+  360 presents), log "[bo] MAPTEST2 step ...": 1 normal, 2 stereo off (one picture for both eyes), 3 AFW, 4 normal again;
+  then restores native + AFW as they were. Gameplay control dropped (steps 1 / 4 vs 2 / 3 compare within the map).
+- STATIC: built clean, CTests 3/3, installed 32FFF0A10D0647E3... (backup re/backups/before-eyeburst = the PANELMOUSE build).
+- JJ: start Origins in VR, open the map, open the panel, HUD drawer, press the button, close the panel, keep still ~30 s
+  looking at the window edges; optionally press it again on the upgrades tab. Then I read the 4-8 records offline.
+### EYB1 RESULTS (17:33, JJ pressed MAPTEST2 in the map; LIVE + objective pictures) -> MAPSAFE
+- Records eyeburst_173310 / 173316 / 173322 / 173328 (normal 540, stereo off 360, AFW 360, normal 360 presents).
+- OBJECTIVE: in the map EVERY eye picture is pure black (lit pixels median 0) and the whole map is on the HUD sheet (~104k
+  lit px at 1/4 size) - EXCEPT single passes: normal L 44 + L 106 (2 in 3 s), AFW R 271, normal again L 114; stereo off
+  (one picture for both eyes) 0. In each flash pass the WHOLE map (103.7k lit px) is in the eye picture at screen pixels
+  and the sheet holds only the text (10.1k) = the flickering head-locked duplicate. Neighbours of each flash are black.
+- No logged counter moves at the flash passes (EARLYUI "caught" rises at other presents; second scene blits constant 48
+  in the map) -> those passes never started the UI run before the map pieces: the pieces went down the pre-boundary
+  route straight into the eye; the text came after the run started. (MS7's "3D hologram drawn into each eye" is NOT what
+  the pictures show here: the eyes are black, the map is on the sheet.)
+- SOURCE MAPSAFE (gfx_hud classify): while the game's own signal says a map-type screen is open (MENUSTATE BackScreen /
+  Map -> set_menu_screen) and the HUD redirect is on, the first backbuffer draw before the boundary starts the UI run at
+  once (no eye-pass flag needed) and clears the eye black; a full-screen blit after such a start is dropped (EARLYSTRICT
+  would have put that opaque blit ON the sheet). Counters: starts / starts without the eye-pass flag / blits dropped,
+  logged by MAPTEST2 and recorded per present in EYEBURST index.txt. `bo mapsafe on|off`, panel HUD checkbox, default ON.
+- MAPTEST2 now: MAPSAFE on 6 s / off 6 s / on 6 s (1080 presents each), restores. STATIC: built clean, CTests 3/3,
+  installed 4FCEB2F6EF1218DF... Not run.
+- Judge: flashes 0 in steps 1 + 3, > 0 in step 2; "starts" rises in steps 1/3 (and "without eye pass" says why EARLYUI
+  missed); JJ sees no flicker at the map edges; after closing the map, gameplay picture normal (risk: a menu signal stuck
+  on would make MAPSAFE drop the scene blit in gameplay = black eyes; MS7 group close should prevent it).
+### MAPSAFE run 1 (17:45, JJ HEADSET: "When I first entered the map it didn't flicker ... then all of a sudden it flickered
+### and then the map became attached to my face and now I can't exit out of that mode. The map just stays there when I exit")
+- LIVE: MAPTEST2 was NOT pressed (MAPSAFE simply on by default). Map open 17:45:11.65-19.42 (7.7 s): MAPSAFE dropped a
+  full-screen blit at 16.29 and 17.20 (log capped at 3 lines; the start counters were not logged anywhere). The map signal
+  went OFF at 19.446 as it should (and on/off again 20.65-21.49), so MAPSAFE was inactive when the stuck map was seen in
+  gameplay -> the stuck picture is a LEFTOVER state, not MAPSAFE acting. Pause 26.44, quit 28.60 (known exit fault).
+- Not yet known what holds the map after closing (candidates: the HUD sheet no longer cleared / redirected; a picture
+  held by the DLSS / eye path; the dropped blit leaving the backbuffer content in use). No guess fixes.
+- SOURCE: MAPSAFE default OFF (test switch only). MAPREC (scene.cpp, default on in this test build): every map opening
+  records 8 s and every closing 5 s with EYEBURST, no button; MAPSAFE counters now in the 5 s status line and in each
+  MAPREC line. `bo maprec on|off`. STATIC: built clean, CTests 3/3, installed 7468A8D709581B6B...
+| # | JJ does (no talking) | records | judge |
+|---|---|---|---|
+| 1 | gameplay, open the map ~8 s, close, play ~5 s | open + close, MAPSAFE off | baseline flashes; after-close pictures normal |
+| 2 | VR menu > HUD > tick MAPSAFE; open the map ~8 s, close, play ~5 s; repeat once | 2 x (open + close), MAPSAFE on | flashes gone?; if the map sticks: the close record shows WHERE (eye or sheet) and from which present |
+| 3 | if stuck: VR menu > HUD > untick MAPSAFE, look 5 s, then quit; tell me afterwards whether unticking cleared it | - | clears = an ongoing MAPSAFE effect; stays = a leftover |
+### Run 17:51 (JJ ticked "Map: eyes black, map art on the sheet (MAPBLIT)" by mistake -> "everything has frozen and become
+### stuck to my face")
+- LIVE: MAPSAFE stayed OFF the whole run (starts 0); "MAPBLIT2 passes blanked" rose from 17:51:45 = MAPBLIT ticked (MS7's
+  known-bad face-locked map). Fixed remotely: `bo mapsafe off` 17:52:11 (no effect, was off), `bo mapblit off` 17:52:30.
+  So the 17:45 "stuck to my face" (MAPBLIT 0 then) WAS MAPSAFE; this one was MAPBLIT.
+- MAPREC baseline eyeburst_175126 (map open, both fixes off, 1200 presents / 6.7 s): 5 flashes, ALL LEFT eye (612, 832, 914,
+  1008, 1190) - the first pass of each pair. Same signature as EYB1 (left in normal steps).
+- PANELWORDS (JJ: "Some of the labels on these things are very confusing"): HUD drawer = only player settings in plain
+  words; MAPBLIT removed from the menu (command only); EARLYUI / EARLYSTRICT / menu flicker test -> commands only; new
+  drawer "TESTS (only when Claude asks)" with the MAPSAFE box labelled "EXPERIMENTAL, once made the map stick to your face"
+  and "Record the map for 30 s". Built clean, CTests 3/3, installed 257CA84E371DAE79...
+- Open: why MAPSAFE (17:45) left the map stuck after closing it - the next step reads its MAPREC close record; first build
+  a sim / offline check before JJ touches it again.
+
+## TEST PLAN EYB3 - which routing rule sends the map into the LEFT eye with DLSS on (2026-10-13 ~18:45)
+JJ: "tested with DLSS disabled and the flickering wasn't as bad. It started a bit later after entering the map, but it still
+happened." OBJECTIVE (MAPREC records): DLSS OFF run 18:39 (log .prev): map visits eyeburst_183902 + 183927 = 0 flash pictures
+in 2 x 6.7 s (183955: 1 untagged); DLSS ON run 18:41 eyeburst_184140 = 5 flashes in 6.7 s, ALL LEFT eye (360, 434, 462, 554,
+766) - the eye OVERLAP holds back while DLSS finishes it. Earlier DLSS-on records: all left too (EYB1 normal steps, 175126).
+Looked up: DLSS only copies at present (dlss_bridge 477/518/707/740/761: backbuffer -> DLSS colour, output -> swapchain), it
+draws nothing inside the game's pass -> it changes TIMING, not routing. The flash passes are TAGGED left (index sign -1), so
+BeginDrawing found the tag: redirect on + eye pass open (scene.cpp 159-160). Remaining route candidates inside classify:
+(1) the transition "keep in eye" rule (cut pieces / pure-cut frames / wipeRest - City OPENFADE saw a map-opening frame sent
+full-view into the eye by the pure-cut rule); the map's floor plan = untextured shapes, text = textured -> matches "map in
+the eye, only text on the sheet"; (2) the pre-boundary route without EARLYUI; (3) something DLSS timing changes per pass.
+SOURCE EYB3: tracer letters for the keep rule (C cut piece, W after a wipe frame, G after a pure-cut frame); MAPREC now also
+starts LEAKTRACE (captures\maptrace_<time>\leaktrace.txt: one line per present, eye-bound draws "pre:"/"eye:" with count +
+texture size, routing letters, leaking eye pictures saved) for every map opening; EYEBURST2 adds the FINISHED headset images
+(after DLSS / held-left finish / bat paint: final.raw + final.txt), 1/8 size, open 10 s / close 5 s; index states: redirect,
+HUD menu mode, HUD head-locked. viewer prints per-stream lit pixels + saves 3 final pictures. MAPSAFE stays OFF.
+STATIC: built clean, CTests 3/3, installed E4D9066C2485BF43...
+| # | JJ does (DLSS ON, no talking) | proves | judge |
+|---|---|---|---|
+| 1 | load into gameplay, open the map, keep still ~10 s, close, play ~5 s | the route | leaktrace: leaking presents (left) list "eye:" draws (post-boundary, + C/W/G = keep rule) or "pre:" (pre-boundary); final images show how many frames DLSS carries each flash |
+| 2 | repeat once (more flashes) | repeatability | same letters on every leak |
+Prepared: keep rule -> on a map-type screen (MENUSTATE) no piece is kept in the eye (cut rules off while the map is open,
+nothing else changes); pre-boundary -> EARLYUI without the eye-pass flag on map screens only (narrow, not MAPSAFE's blit drop).
+### EYB3 RESULTS (18:54-18:55, JJ DLSS on, 3 map visits; LIVE traces maptrace_185451 / 185510 / 185525) -> MAPHOLD + VIEWDEBOUNCE
+- OBJECTIVE: every map leak is ONE pass whose map pieces never reached our sorting: a LEFT pass with "draws 38 sheet 37"
+  (normal 76-78; p4676, p6515, p6853, p7287, p9027 ...) - the ~40 map pieces went into the game's scene picture before the
+  scene blit (not the backbuffer, so never counted), which then carried them full-view into the eye; plus one UNTAGGED pass
+  (p4890 "sign 0 redirect 0 ... sheet 0 eye 77": no eye tag -> menu layer off -> everything into the eye; untagged
+  presents go to the LEFT swapchain = why always left). Smaller ones (39-45 pieces) leak partly (below the leak threshold).
+  The keep rule (C/W/G letters) never fired: ruled out. DLSS changes the pass timing that makes these passes likelier.
+- JJ: "the very last one during the flickering, it actually reset the centering". LIVE 18:55:40.545 / 41.044: "camera mode
+  off" -> "ON" within 20 ms, twice: scene.cpp turned camera mode off for any draw root with no 3D view (one map frame).
+- SOURCE MAPHOLD (gfx_hud before_eye_capture, after the tracer): on a map-type screen (MENUSTATE), a pass with < 60 % of
+  the last full pass's sheet pieces, or no redirect, gets its eye picture cleared black and the last full map sheet put
+  back (max 4 in a row; settled 0.5 s after opening). Offline replay of the 3 traces: every leak pass held; the other holds
+  are the same kind of left pass (39-45 pieces). `bo maphold on|off`, TESTS drawer box, status line, default ON.
+- SOURCE VIEWDEBOUNCE (scene.cpp): camera mode off only after 300 ms without a 3D view. `bo viewdebounce 0|1`, default ON.
+- STATIC: built clean, CTests 3/3, installed 9A0DA7E9BFA4A7E0... MAPREC + tracer still record each map visit.
+| # | JJ does (DLSS on, no talking) | judge |
+|---|---|---|
+| 1 | gameplay, open the map ~15 s, look around, close, play a bit; repeat twice; switch map / upgrades tabs once | JJ: no flicker, no re-centre, map moves normally; log "MAPHOLD pass with N of M map pieces" lines; status "map passes replaced" rises in the map only; MAPREC final images: no map in the eyes |
+| 2 | if anything is wrong: VR menu > TESTS > untick "Map flicker fix 2" | the old behaviour returns (A/B) |
+### MAPHOLD run 1 (19:03, JJ HEADSET: "fine for about 15 to 20 seconds and then the map flicker outside the map returned and it
+### reset the centering") -> MAPHOLD2 + VIEWDEBOUNCE2
+- LIVE: MAPHOLD held passes (38/41/38/44/37/38 of 75-77 ...), counts +3 / +13 / +26 / +42 / +33 per 5 s. Trace 190324: short
+  passes carry 37-59 pieces (all LEFT); the 60 % rule let 50-59 through AND each became the new reference (g_mapFull = last
+  pass), after which 38-piece passes were >= 60 % of it = no longer held -> the flicker returned. Glitch RATE unchanged around
+  the event (13 / 954 presents before, 10 / 684 after).
+- Re-centre: 19:03:32.384 camera mode off -> ON in 18 ms with VIEWDEBOUNCE on: the OTHER path - a draw root from another
+  caller (ra != gameplay caller) makes eligible false -> set_camera_mode(false). The same frame = the untagged pass p4455.
+- SOURCE MAPHOLD2: reference = fullest recent pass (only raised), pass < 90 % of it held; a real screen change accepted after
+  8 short passes in a row; 8 passes without the menu layer stop holding (no stuck state). VIEWDEBOUNCE2: a foreign root leaves
+  camera mode alone while the gameplay caller drew within 300 ms. Offline replay of all 4 traces: every short pass held
+  (19 / 25 / 14 / 30), no reference drift, no false screen changes.
+- STATIC: built clean, CTests 3/3, installed BB749941DABB2997... HEADSET pending. (Steam busy with an AKN xrsim run by
+  vr-modding-0a for ~40-60 min from ~19:10.)
+### MAPHOLD2 run (21:29-21:31, JJ HEADSET: "a lot better, but the flickering is still there a little bit off to the left and I
+### get the occasional full field of view blackout for one frame and also occasionally recenters ... not a deal breaker") -> MAPMONO
+- OBJECTIVE: finished headset images in both 10 s map records (eyeburst_213005 / 213042, 1798 each): eye lit max 114 = no map
+  in the eyes. Near-empty sheets only at the map opening (fade). MAPHOLD replaced ~14 passes/s. The leftover events fall
+  OUTSIDE the 10 s records: log "MAPHOLD menu layer off for 8 passes - hold stopped" at 21:30:32 and 21:31:04 = runs of
+  untagged passes (tag-miss 0 the whole run, no camera-mode toggles = the game's own mono path: !ordinary / not active).
+  Untagged presents in projection mode are captured into the LEFT swapchain with a stale pose = flicker on the left, a black
+  frame (MAPHOLD clears the eye), a jump (re-centre feel).
+- SOURCE MAPMONO (openxr_runtime on_present_end): while the map signal is on (gfx_hud::menu_screen_on), an untagged present
+  in projection mode is not captured - the headset keeps the last stereo pair. `bo mapmono 0|1`, default on; status
+  "mono map presents kept from the headset N". EYB4: the tracer now covers the whole map visit (10800 presents).
+- STATIC: built clean, CTests 3/3, installed E761E913D6EE9CB7... HEADSET pending.
+### MAPMONO run (21:39-21:41, JJ HEADSET: "those same issues are still present") -> MAPHOLD3 + VIEWDEBOUNCE3
+- OBJECTIVE (trace maptrace_214005, whole visit 10123 presents; eyeburst_214005 first 10 s): eye pictures black in every
+  recorded present. Runs of 20-24 passes with ONE sheet piece (the game's quick fade) at the opening (p3395) and twice more
+  ~25 s apart (p7921, p12411): MAPHOLD held 8, then "hold stopped" let the empty sheet through for ~15 = full-view black.
+  Two untagged passes (p3687, p4968; eye 75) = the two camera-mode off -> ON toggles (21:40:07.635, 16.426): the GAMEPLAY
+  caller ineligible for one frame (no fresh pose generation), not a foreign caller - VIEWDEBOUNCE2 did not cover it; with
+  camera mode off that frame is not in projection mode, so MAPMONO did not skip it either (= flicker + jump).
+- SOURCE MAPHOLD3: a near-empty pass (< 15 % of the reference) is held up to 90 passes (~0.5 s), a real screen change still
+  after 8. VIEWDEBOUNCE3: any single ineligible root (any caller) within 300 ms of an eligible one leaves camera mode alone
+  while head tracking + native stereo are wanted -> the frame renders mono and MAPMONO keeps it off the headset on the map.
+- STATIC: built clean, CTests 3/3, installed 1762711057E51992... HEADSET pending (Steam busy: vr-modding-0a AK run ~21:45).
+
+## RELEASE 0.1.0 - first public package (2026-10-14; JJ: "is there anything left outstanding ... if not then package it up")
+Looked up: PACKAGING_GUIDE.md (all sections; §12 tidy the panel first + test tools behind one switch, §13 ship the
+recorded bat transition + launcher data, uninstaller deletes the data folder); City's 0.1.4 package (install/*.ps1,
+tools/make_package.py, README) as the pattern; City VSYNCOFF (Origins d3d11_hook already forces interval 0 while a
+session runs, line 158); memory panel-labels-plain-no-bad-switches; VR_ESSENTIALS §6 panel rule.
+- Outstanding check: MAPHOLD3 + VIEWDEBOUNCE3 (last entry above, "HEADSET pending"). LIVE 2026-10-14 01:13-01:15 (JJ, DLSS 4):
+  37 s on the map, MAPHOLD replaced 389 short passes, NO "hold stopped" lines, NO camera-mode off/on toggles (= no blackouts,
+  no re-centres in the log), normal quit (WM_CLOSE). Treated as accepted for the package; JJ's own verdict not recorded.
+- Removed automatic recorders: MAPREC (every map visit recorded 10 s + leak trace) default OFF; the bats' automatic
+  bat_layers_* sample at the first two events removed; old MENUTEST / MAPTRACE / MAPTEST2 threads removed (MAPTRACE and
+  MAPTEST2 toggled MAPBLIT / MAPSAFE, both known to stick the map to the face). Status heartbeat every 30 s (5 s with
+  test options on). pacetrace.log kept (City ships the same).
+- Panel = City layout: title + status line, Recenter / Save capture / Head tracking buttons, controller hint, STEREO
+  RENDERING, VIEW, HUD (City's degree sliders, head-attach, pause/map screen), MENUS AND SCREENS (bats, movie screen, this
+  menu), VR RESOLUTION, DLSS, Keyboard shortcuts, then the TESTS drawer at the bottom (test numbers switch, reflections
+  A/B, map fix A/B, map / eye-picture recorders, bat test buttons, diagnostics). New saved keys: [hud] on_head,
+  menu_distance, menu_width; [screens] distance, width, panel_width, panel_distance; [stereo] afw, afw_mode. Meta-button
+  recentre (City's runtime_recenter_count) added.
+- Package: install/ (Install-BatmanOriginsVR, Uninstall-BatmanOriginsVR, the two launchers), tools/make_package.py,
+  dist/BatmanOriginsVR-ArkhamOrigins.zip. Installer: first-install backup of GFXSettings xml + BmEngine.ini, DoF / motion
+  blur / V-sync off, JJ's settings.ini + bat-wipe.bin into %LOCALAPPDATA%\Batman_Origins (first install only), shortcuts.
+  Uninstaller: removes every mod file, puts both settings files back from that backup, deletes the data folder + shortcuts.

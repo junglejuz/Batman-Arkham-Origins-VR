@@ -225,3 +225,22 @@ corners. Full-FOV geometry, distance/zoom, event timing and menu preservation
 are retained. O1H live/headset proof is pending. Reference: playbook 09
 #typeless-swapchain, framework guide 10 sections 1/2.4, VR_HUD_GUIDE sections 6/8;
 checkout `b955f2244f7c5d5f3b3e5f403b1b6721a3362423`.
+
+## RELEASE 0.1.0 installer / uninstaller (2026-10-14) - every change to files we did not write
+
+Installer (`install/Install-BatmanOriginsVR.ps1`), all edits byte-preserving UTF-16 through `tools/Graphics-Profile.ps1`:
+
+| File | Change | Why | Undo |
+|---|---|---|---|
+| `<game>\SinglePlayer\BMGame\Config\BmEngine.ini` | first install: copied to `<game>\BatmanOriginsVR_backup\config\` | the player's originals | uninstaller copies it back |
+| `<Documents>\WB Games\Batman Arkham Origins\GFXSettings.BatmanArkhamOrigins.xml` | first install: copied to `<game>\BatmanOriginsVR_backup\documents\` (+ `documents_dir.txt`) | same | same |
+| BmEngine.ini | `DepthOfField=False`, `NVDOF=False`, `DisableHighQualityDOF=True` (Disable-OriginsDepthOfField, as the launcher) ; every `UseVsync=` -> `False`, every `MotionBlur=` -> `False` | JJ: all DoF off; VR_ESSENTIALS 7 (V-sync, motion blur) | backup restore |
+| GFXSettings xml | `DepthOfField` -> `OFF`, `VSync` -> `false`, `MotionBlur` -> `false` | same | backup restore |
+| `<game>\SinglePlayer\Binaries\Win32\` | adds `xinput1_3.dll` (proxy, marker `[batman_origins-proxy]`), `batman_origins.dll`, `bo_xr_config32.exe`, `OriginsVR\`, `BatmanOriginsDLSS\`, `originsvr_manifest.json`, the two launchers, the uninstaller; a foreign `xinput1_3.dll` is saved to the backup's `binaries\` | the mod | uninstaller deletes them, puts a foreign proxy back |
+| `%LOCALAPPDATA%\Batman_Origins\settings.ini` | first install only: JJ's tested file | tested setup | uninstaller deletes the folder (`-KeepSettings` keeps it) |
+
+Per VR launch (unchanged from O1H, `tools/Launch-VR.ps1`): GFX `Fullscreen=false`, `ResolutionX/Y` = render size,
+`VSync=false` (+ `AntiAliasing=OFF` with DLSS); BmEngine `bSmoothFrameRate=False` (+ TXAA / MSAA / post AA off with DLSS),
+journal `profile-active.json`, restored byte-exact after the game exits (also by the next launch / installer / uninstaller
+if interrupted). JJ's own PC: the installer backup was seeded from `baselines/first-install` (his pre-mod files,
+2026-10-11 03:07), so his uninstall returns to his real originals, not the already-modded state.

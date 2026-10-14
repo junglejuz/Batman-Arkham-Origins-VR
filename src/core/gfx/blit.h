@@ -98,7 +98,8 @@ bool alpha_to_r8(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* dst, UINT dst
                  ID3D11ShaderResourceView* src);
 bool mask_black(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* dst, UINT dstW, UINT dstH,
                 ID3D11ShaderResourceView* mask, float zoom, bool invert = false,
-                float opacity = 1.f, float blackFill = 0.f); // invert: black where the mask is clear
+                float opacity = 1.f, float blackFill = 0.f, // invert: black where the mask is clear
+                float shiftX = 0.f, float shiftY = 0.f);    // EYEBATS: picture centre moved (destination uv)
 bool halo_under(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* dst, UINT dstW, UINT dstH,
                 ID3D11ShaderResourceView* src, ID3D11ShaderResourceView* smallAlpha, const float params[4]);
 

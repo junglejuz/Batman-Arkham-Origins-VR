@@ -102,12 +102,13 @@ OverlayOut ps_overlay(VSOut i) {
 cbuffer HaloCB : register(b3) { float4 halo; } // down: xy = source texel size | under: xy = radius (uv), z gain, w strength
 // Batman City WIPEREPLAY: the source drawn over the whole destination, enlarged by zoom.x about the centre (clamped
 // edges continue the border - the wipe's black reaches every edge).
-cbuffer ZoomCB : register(b4) { float4 zoom; }
+// Origins EYEBATS: zoomShift.xy moves the picture's centre (destination uv) - each eye's own straight-ahead point.
+cbuffer ZoomCB : register(b4) { float4 zoom; float4 zoomShift; }
 VSOut vs_zoom(uint id : SV_VertexID) {
     VSOut o;
     float2 uv = float2((id << 1) & 2, id & 2);
     o.pos = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
-    o.uv = 0.5 + (uv - 0.5) / zoom.x;
+    o.uv = 0.5 + (uv - 0.5 - zoomShift.xy) / zoom.x;
     return o;
 }
 // WIPEREPLAY storage: the wipe's coverage (alpha) into a one-channel picture, and back as black with that coverage.
@@ -745,7 +746,8 @@ bool ensure_transition_cover(ID3D11DeviceContext* ctx) {
 }
 
 bool zoom_draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* dst, UINT dstW, UINT dstH,
-               ID3D11ShaderResourceView* src, float zoom, int mode, float opacity=1.f, float blackFill=0.f) {
+               ID3D11ShaderResourceView* src, float zoom, int mode, float opacity=1.f, float blackFill=0.f,
+               float shiftX=0.f, float shiftY=0.f) {
     if (!g_vsZoom) {
         if (g_zoomFailed || !ensure_pipeline(ctx)) return false;
         ID3D11Device* dev = nullptr;
@@ -769,7 +771,7 @@ bool zoom_draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* dst, UINT dstW,
         }
         if (ok) {
             D3D11_BUFFER_DESC cbd{};
-            cbd.ByteWidth = 16;
+            cbd.ByteWidth = 32;
             cbd.Usage = D3D11_USAGE_DYNAMIC;
             cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
             cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -786,8 +788,8 @@ bool zoom_draw(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* dst, UINT dstW,
     }
     D3D11_MAPPED_SUBRESOURCE m{};
     if (FAILED(ctx->Map(g_zoomCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
-    const float z[4] = {zoom > 0.01f ? zoom : 1.0f, opacity, blackFill, 0};
-    memcpy(m.pData, z, 16);
+    const float z[8] = {zoom > 0.01f ? zoom : 1.0f, opacity, blackFill, 0, shiftX, shiftY, 0, 0};
+    memcpy(m.pData, z, 32);
     ctx->Unmap(g_zoomCb, 0);
     ID3D11Buffer* oldCb = nullptr;
     ctx->VSGetConstantBuffers(4, 1, &oldCb);
@@ -851,8 +853,9 @@ bool alpha_to_r8(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* dst, UINT dst
     return zoom_draw(ctx, dst, dstW, dstH, src, 1.0f, 1);
 }
 bool mask_black(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* dst, UINT dstW, UINT dstH,
-                ID3D11ShaderResourceView* mask, float zoom, bool invert, float opacity, float blackFill) {
-    return zoom_draw(ctx, dst, dstW, dstH, mask, zoom, invert ? 3 : 2, opacity, blackFill);
+                ID3D11ShaderResourceView* mask, float zoom, bool invert, float opacity, float blackFill,
+                float shiftX, float shiftY) {
+    return zoom_draw(ctx, dst, dstW, dstH, mask, zoom, invert ? 3 : 2, opacity, blackFill, shiftX, shiftY);
 }
 
 bool alpha_down(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* dst, UINT dstW, UINT dstH,

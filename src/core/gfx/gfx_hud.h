@@ -28,6 +28,36 @@ struct IDXGISwapChain;
 namespace bvr::gfx_hud {
 // Origins DX11 uses a non-indexed fullscreen triangle for the scene resolve.
 void set_triangle_boundary(bool on);
+// EARLYUI: a backbuffer draw before the scene blit starts the UI run provisionally (dropped if the blit follows).
+void note_eye_pass(bool stereoEye, int sign = 0); // render thread, at each pass start (BeginDrawing); cleared at Present
+// LEAKTRACE (test): per-present draw routing + eye-picture leak check for N presents, files into dir.
+void start_leak_trace(const wchar_t* dir, int presents);
+uint32_t leak_frames();
+bool leak_trace_running();
+void set_early_ui(bool on);
+bool early_ui();
+void early_ui_stats(uint32_t* early, uint32_t* undone);
+// EARLYSTRICT: only the scene's own source picture undoes a provisional UI run (the map grid stays UI). Default on.
+void set_early_strict(bool on);
+bool early_strict();
+uint32_t early_kept();
+uint32_t second_blits(); // EARLYSTRICT v2: scene picture blitted again after the boundary (map-type screens)
+// MAPBLIT: while the map is up the scene blit goes on the HUD sheet and the eye is cleared black. Default on.
+void set_map_blit(bool on);
+bool map_blit();
+uint32_t map_blits();
+// MS3: the adapter's menu signal (a screen menu - map / database - is open) and what MAPBLIT keys on (1 = it, 0 = shape).
+void set_menu_screen(bool on);
+bool menu_screen_on();      // the game's own map-type screen signal (MENUSTATE), as last set
+void set_map_hold(bool on); // MAPHOLD: on a map-type screen a pass that missed the map shows the last full map (default on)
+bool map_hold_on();
+void map_hold_stats(uint32_t* holds, uint32_t* untagged);
+void set_map_safe(bool on);  // MAPSAFE: on a map-type screen everything before the boundary is UI, eye black (default on)
+bool map_safe();
+void map_safe_stats(uint32_t* starts, uint32_t* noPass, uint32_t* skips);
+void set_map_blit_source(int src);
+int map_blit_source();
+uint32_t map_blits_provisional(); // MS7: passes without a scene blit blanked on a screen menu
 
 // What the frame_inspector detour should do with the current draw. At most
 // one of redirectRtv / restoreRtv is set; both null = pass through.
@@ -55,6 +85,7 @@ using ClearOverrideFn = void (*)(ID3D11DeviceContext*, ID3D11DepthStencilView*, 
 void set_draw_override(DrawOverrideFn, DrawRestoreFn, FrameEndFn, ClearOverrideFn);
 ID3D11BlendState* capture_blend(ID3D11DeviceContext*);
 ID3D11RenderTargetView* ui_target(ID3D11DeviceContext*, unsigned* w, unsigned* h);
+ID3D11Texture2D* hud_sheet_texture(); // EYEBURST: this frame's HUD sheet (no reference added, never cleared here)
 // Clear only the separate UI capture, never the scene/backbuffer.
 void clear_ui_frame(ID3D11DeviceContext*);
 

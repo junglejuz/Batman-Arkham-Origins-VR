@@ -37,7 +37,11 @@ $engine=Join-Path $gameRoot 'SinglePlayer/BMGame/Config/BmEngine.ini'
 Disable-OriginsDepthOfField $gfx $engine $dataDir
 if($SteamVR) {
     $steam=(Get-ItemProperty 'HKCU:/SOFTWARE/Valve/Steam' -ErrorAction SilentlyContinue).SteamPath
-    $candidates=@((Join-Path (Split-Path $gameRoot -Parent) 'SteamVR/steamxr_win32.json'))
+    $candidates=@()
+    # City SVRACTIVE: first the SteamVR install SteamVR itself treats as active (a player with two SteamVR installs).
+    try { $active=(Get-Content -Raw (Join-Path $env:LOCALAPPDATA 'openvr/openvrpaths.vrpath') | ConvertFrom-Json).runtime[0]
+          if($active) { $candidates+=Join-Path $active 'steamxr_win32.json' } } catch { }
+    $candidates+=Join-Path (Split-Path $gameRoot -Parent) 'SteamVR/steamxr_win32.json'
     if($steam) { $candidates+=Join-Path $steam 'steamapps/common/SteamVR/steamxr_win32.json' }
     $json=$candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
     if(!$json) { throw 'SteamVR steamxr_win32.json was not found. Install/update SteamVR first.' }

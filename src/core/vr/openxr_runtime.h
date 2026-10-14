@@ -13,6 +13,7 @@
 struct IDXGISwapChain;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
+struct ID3D11RenderTargetView;
 
 namespace bvr::vr {
 
@@ -190,6 +191,9 @@ bool get_edge_snapshot(EdgeViewSnapshot& out);
 //   status            guard state, detach state, skip/handoff/last-wait
 //                     telemetry, and the per-phase present-path timings
 void handle_pace_command(const char* args);
+void set_map_mono_skip(bool on); // MAPMONO: on a map screen, untagged (mono) presents never reach the headset (default on)
+bool map_mono_skip();
+uint32_t map_mono_skipped();
 
 // --- Session 34: present-detour stage marker ---------------------------------
 // The pace trace can only name a stall inside code it wraps. The BS2 stereo
@@ -594,6 +598,13 @@ void set_transition_distance(float metres);
 struct TransitionStatus {uint32_t generated=0,copied=0,submitted=0,failures=0;};
 TransitionStatus transition_status();
 bool transition_layer_ready();
+// Origins EYEBATS: paint a transition into each finished headset eye image (after DLSS, AFW and the room screen),
+// so it fills the whole view like City's in-eye bats. shiftX/Y = where this eye's straight-ahead point sits for a
+// plane at the transition distance (destination uv, 0 = image centre); frame = the XR frame both eyes share.
+using TransitionEyeFn = bool (*)(ID3D11DeviceContext*, int eye, ID3D11RenderTargetView*, uint32_t w, uint32_t h,
+                                 float shiftX, float shiftY, bool projection, int64_t frame);
+void set_transition_eye_painter(TransitionEyeFn fn);
+uint32_t transition_eye_draws();
 
 // Session 33: the session's state as a short string ("FOCUSED", "SYNCHRONIZED",
 // "none"...) and whether it has EVER been FOCUSED. Cheap, for a heartbeat.

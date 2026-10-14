@@ -5,6 +5,7 @@
 // quad layer containing a copy of the game backbuffer.
 
 #include "core/vr/openxr_runtime.h"
+#include "core/vr/eye_burst.h"
 #include "core/ui/overlay.h"
 
 #include "core/gfx/blit.h"
@@ -522,6 +523,8 @@ std::atomic<uint32_t> g_pmAbortExpired{0}, g_pmAbortLeft{0}, g_pmAbortUntag{0};
 std::atomic<uint32_t> g_pmCap[2] = {};       // SR captures per eye
 std::atomic<uint32_t> g_pmAcqFail{0}, g_pmWaitFail{0};
 std::atomic<uint32_t> g_pmUntaggedProj{0};   // untagged present captured in projection mode
+std::atomic<bool> g_mapMonoSkip{true};        // MAPMONO: untagged presents on a map screen are not captured
+std::atomic<uint32_t> g_mapMonoSkipped{0};
 std::atomic<uint32_t> g_pmRebuilds{0};
 std::atomic<uint32_t> g_pmStereoSubmits{0}, g_pmStaleL{0}, g_pmStaleR{0};
 std::atomic<uint32_t> g_pmAgeMax[2] = {};    // worst capture age at submit, ms
@@ -2041,6 +2044,38 @@ std::atomic<EyeFinishHook> g_eyeFinishHook{nullptr};
 bool g_heldLeft = false;
 uint32_t g_heldLeftIndex = 0;
 std::atomic<uint32_t> g_heldLeftDone{0}, g_heldLeftEarly{0};
+XrFovf g_heldLeftFov{};       // EYEBATS: the held left image's declared lens
+bool g_heldLeftProj = false;
+
+// Origins EYEBATS (JJ 2026-10-13: the black before the first menu and the bat wipe showed as a window; "needs to be
+// enlarged to full FOV and brought closer to the camera", as in Arkham City): the adapter paints its transition into
+// each FINISHED eye image - after DLSS, the held-left finish, AFW and the room screen - instead of a separate quad
+// layer (Virtual Desktop showed that one as a window). Each eye's picture is lined up for a plane straight ahead at
+// the transition distance, so both eyes fuse it there even with the asymmetric per-eye lens.
+ID3D11RenderTargetView* eye_rtv(int e, uint32_t idx);
+std::atomic<TransitionEyeFn> g_transitionEyePainter{nullptr};
+std::atomic<uint32_t> g_transitionEyeDraws{0};
+void transition_in_eye(int eye, uint32_t idx, const XrFovf& fov, bool projection) {
+    const TransitionEyeFn fn = g_transitionEyePainter.load(std::memory_order_relaxed);
+    if (!fn || !g_viewsValid || eye < 0 || eye > 1 || !g_swapW || !g_swapH) return;
+    ID3D11RenderTargetView* rtv = eye_rtv(eye, idx);
+    if (!rtv) return;
+    const float tL = tanf(fov.angleLeft), tR = tanf(fov.angleRight);
+    const float tU = tanf(fov.angleUp), tD = tanf(fov.angleDown);
+    if (tR - tL < 1e-3f || tU - tD < 1e-3f) return;
+    const XrVector3f& l = g_views[0].pose.position;
+    const XrVector3f& r = g_views[1].pose.position;
+    const float dx = r.x - l.x, dy = r.y - l.y, dz = r.z - l.z;
+    const float half = 0.5f * sqrtf(dx * dx + dy * dy + dz * dz);
+    const float ex = eye ? half : -half; // this eye's offset from the head centre, along the view's x
+    const float dist = g_transitionDistance.load(std::memory_order_relaxed);
+    // Destination u of the head's straight-ahead point at `dist`, as an offset from the image centre.
+    const float shiftX = -(tL + ex / dist) / (tR - tL) - 0.5f;
+    const float shiftY = tU / (tU - tD) - 0.5f;
+    if (fn(g_context, eye, rtv, g_swapW, g_swapH, shiftX, shiftY, projection,
+           static_cast<int64_t>(g_frameState.predictedDisplayTime)))
+        g_transitionEyeDraws.fetch_add(1, std::memory_order_relaxed);
+}
 
 // Writes and releases a held left image. early = the pair did not complete normally (logged, counted).
 void flush_held_left(bool early, const char* why) {
@@ -2051,12 +2086,14 @@ void flush_held_left(bool early, const char* why) {
     if (g_swapchains[0] == XR_NULL_HANDLE || g_heldLeftIndex >= g_images[0].size()) return;
     ID3D11Texture2D* dst = g_images[0][g_heldLeftIndex].texture;
     if (EyeFinishHook f = g_eyeFinishHook.load(std::memory_order_relaxed)) f(g_context, dst);
+    if (g_heldLeftProj) transition_in_eye(0, g_heldLeftIndex, g_heldLeftFov, true); // EYEBATS
     if (g_eyeSaveMask.load(std::memory_order_relaxed) & 1) {
         wchar_t path[MAX_PATH];
         swprintf_s(path, L"%s\\eye_left.bmp", g_eyeSaveDir);
         bvr::gfx_hud::save_texture_bmp(g_context, dst, path);
         g_eyeSaveMask.fetch_and(~1, std::memory_order_relaxed);
     }
+    eye_burst::on_final(g_context, dst, 0); // EYEBURST2: the held left image as the headset gets it
     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     xrReleaseSwapchainImage(g_swapchains[0], &ri);
     g_heldLeftDone.fetch_add(1, std::memory_order_relaxed);
@@ -4027,6 +4064,7 @@ bool screen_room_render(ID3D11Texture2D* backbuffer, const XrPosef& screen, floa
             float clip[4][4];
             for (int c = 0; c < 4; ++c) eye_clip(g_views[e], world[c], clip[c]);
             ok = rtv && bvr::blit::screen_in_eye(g_context, rtv, g_swapW, g_swapH, g_flatSrv, clip);
+            if (ok) transition_in_eye(e, idx, g_views[e].fov, false); // EYEBATS: over the room, full view
         }
         XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         xrReleaseSwapchainImage(g_swapchains[e], &ri);
@@ -4241,6 +4279,13 @@ void on_present_end(IDXGISwapChain* swapchain) {
     bool srFrame = projectionMode && srSign != 0;
     // AFW (BATMAN_CITY_PLAN.md §11): one drawn eye + the other built from it, both submitted at this present.
     const bool afwFrame = srFrame && g_srPopAfw;
+    if (eye_burst::active()) { // EYEBURST: what goes to the headset, before anything is painted into it
+        ID3D11Texture2D* bb = nullptr;
+        if (SUCCEEDED(swapchain->GetBuffer(0, IID_PPV_ARGS(&bb))) && bb) {
+            eye_burst::on_present(g_context, bb, srSign, g_srPopGen, afwFrame);
+            bb->Release();
+        }
+    }
     // HUD capture gate (session 19): the gameswf redirect runs only while
     // stereo gameplay frames flow (menus stop the eye tags -> gate drops).
     bvr::hud::set_gate(srFrame);
@@ -4324,7 +4369,16 @@ void on_present_end(IDXGISwapChain* swapchain) {
     int currentEyeSign = (g_currentEye == 0 ? -1 : 1) * eyeFlip;
     bool eyeCaptured = false;
 
-    if (g_frameState.shouldRender && g_swapchains[0] != XR_NULL_HANDLE) {
+    // MAPMONO (JJ 2026-10-13 21:3x: "the flickering is still there a little bit off to the left and I get the occasional full
+    // field of view blackout for one frame and also occasionally recenters"; log: "MAPHOLD menu layer off for 8 passes"
+    // twice, tag-miss 0): now and then the game draws a few map frames down its own mono path (no eye tag). Such a present
+    // was captured into the LEFT eye with a stale pose = flicker on the left, black / jump. While a map-type screen is up
+    // (the game's MENUSTATE signal) an untagged present in projection mode is not captured at all: the headset keeps the
+    // last stereo pair (the map screen barely changes). `vr mapmono 0|1`, default on; counter in the pair status.
+    const bool skipMono = projectionMode && !srFrame && !aerActive && g_mapMonoSkip.load(std::memory_order_relaxed) &&
+                          bvr::gfx_hud::menu_screen_on();
+    if (skipMono) g_mapMonoSkipped.fetch_add(1, std::memory_order_relaxed);
+    if (g_frameState.shouldRender && g_swapchains[0] != XR_NULL_HANDLE && !skipMono) {
         ID3D11Texture2D* backbuffer = nullptr;
         if (SUCCEEDED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer)))) {
             int srEye = srSign < 0 ? 0 : 1;
@@ -4348,6 +4402,7 @@ void on_present_end(IDXGISwapChain* swapchain) {
                 XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
                 wi.timeout = XR_INFINITE_DURATION;
                 bool imageReady;
+                XrFovf paintFov{}; // EYEBATS: this image's declared lens (projection mode)
                 {
                     PhaseMark mark(kPhAcquire); // XR_INFINITE_DURATION lives here
                     imageReady = XR_SUCCEEDED(xrWaitSwapchainImage(g_swapchains[target], &wi));
@@ -4367,6 +4422,27 @@ void on_present_end(IDXGISwapChain* swapchain) {
                     int64_t tCap = phase_now();
                     deferred = capture_frame(target, index, backbuffer, pairHold && srFrame && target == 0);
                     phase_record(kPhCapture, tCap);
+                    if (projectionMode) { // EYEBATS: the lens this image is declared with (as the layer below)
+                        XrFovf eyeFov{};
+                        if (srFrame && g_asymFov.load(std::memory_order_relaxed) &&
+                            g_eyeFovValid.load(std::memory_order_relaxed)) {
+                            eyeFov = {g_eyeFovAngles[target][0].load(std::memory_order_relaxed),
+                                      g_eyeFovAngles[target][1].load(std::memory_order_relaxed),
+                                      g_eyeFovAngles[target][2].load(std::memory_order_relaxed),
+                                      g_eyeFovAngles[target][3].load(std::memory_order_relaxed)};
+                        } else {
+                            const float halfH = hfovDeg * 0.5f / 57.29578f;
+                            const float halfV = atanf(tanf(halfH) * static_cast<float>(g_swapH) /
+                                                      static_cast<float>(g_swapW));
+                            eyeFov = {-halfH, halfH, halfV, -halfV};
+                        }
+                        paintFov = eyeFov;
+                        if (deferred) { g_heldLeftFov = eyeFov; g_heldLeftProj = true; } // painted at its finish
+                        else if (!afwFrame) transition_in_eye(target, index, eyeFov, true);
+                        // AFW: both eyes are painted after the warp below, so the warp never copies our picture.
+                    } else if (deferred) {
+                        g_heldLeftProj = false;
+                    }
                     {
                         const int m = g_eyeSaveMask.load(std::memory_order_relaxed);
                         const int eyeBit = srFrame ? (1 << srEye) : 3;
@@ -4402,6 +4478,16 @@ void on_present_end(IDXGISwapChain* swapchain) {
                             if (!warped) g_context->CopyResource(other, drawn); // flat, never a stale eye
                             (warped ? g_afwWarped : g_afwFlat).fetch_add(1, std::memory_order_relaxed);
                             afwOther = o;
+                            if (projectionMode) { // EYEBATS: both eyes, after the warp has read the drawn one
+                                XrFovf otherFov = paintFov;
+                                if (g_asymFov.load(std::memory_order_relaxed) &&
+                                    g_eyeFovValid.load(std::memory_order_relaxed))
+                                    otherFov = {g_eyeFovAngles[o][0].load(std::memory_order_relaxed),
+                                                g_eyeFovAngles[o][1].load(std::memory_order_relaxed),
+                                                g_eyeFovAngles[o][2].load(std::memory_order_relaxed),
+                                                g_eyeFovAngles[o][3].load(std::memory_order_relaxed)};
+                                transition_in_eye(o, oi, otherFov, true);
+                            }
                             const int m = g_eyeSaveMask.load(std::memory_order_relaxed);
                             if (m & (1 << o)) {
                                 wchar_t path[MAX_PATH];
@@ -4409,15 +4495,19 @@ void on_present_end(IDXGISwapChain* swapchain) {
                                 bvr::gfx_hud::save_texture_bmp(g_context, other, path);
                                 g_eyeSaveMask.fetch_and(~(1 << o), std::memory_order_relaxed);
                             }
+                            eye_burst::on_final(g_context, other, o); // EYEBURST2: AFW's built eye
                         }
                         XrSwapchainImageReleaseInfo ori{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
                         xrReleaseSwapchainImage(g_swapchains[o], &ori);
                     }
                 }
+                if (afwFrame && imageReady && !deferred && projectionMode)
+                    transition_in_eye(target, index, paintFov, true); // EYEBATS: the drawn eye, after the warp
                 if (deferred) {
                     g_heldLeft = true;
                     g_heldLeftIndex = index;
                 } else {
+                    if (imageReady) eye_burst::on_final(g_context, g_images[target][index].texture, target); // EYEBURST2
                     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
                     xrReleaseSwapchainImage(g_swapchains[target], &ri);
                 }
@@ -5564,6 +5654,10 @@ void set_spike_trace(bool on) {
     }
 }
 
+void set_map_mono_skip(bool on) { g_mapMonoSkip.store(on); BVR_LOG("xr: MAPMONO %s", on ? "on" : "off"); }
+bool map_mono_skip() { return g_mapMonoSkip.load(); }
+uint32_t map_mono_skipped() { return g_mapMonoSkipped.load(); }
+
 void handle_pace_command(const char* args) {
     char verb[16] = {};
     int consumed = 0;
@@ -6178,6 +6272,8 @@ void set_hud_texture_provider(HudTextureProviderFn fn) {
     g_hudTexProvider.store(fn, std::memory_order_relaxed);
 }
 void set_transition_texture_provider(TransitionTextureProviderFn fn) { g_transitionProvider.store(fn); }
+void set_transition_eye_painter(TransitionEyeFn fn) { g_transitionEyePainter.store(fn); }
+uint32_t transition_eye_draws() { return g_transitionEyeDraws.load(); }
 TransitionStatus transition_status() {
     return {g_transitionGenerated.load(),g_transitionCopied.load(),g_transitionSubmitted.load(),g_transitionFailures.load()};
 }
@@ -6275,6 +6371,9 @@ bool get_edge_snapshot(EdgeViewSnapshot&) { return false; }
 void set_enabled(bool) {}
 void set_sr_pair_pacing(bool) {}
 void handle_pace_command(const char*) {}
+void set_map_mono_skip(bool) {}
+bool map_mono_skip() { return false; }
+uint32_t map_mono_skipped() { return 0; }
 void set_pace_detach(bool) {}
 void set_pace_sync(bool) {}
 void set_spike_trace(bool) {}

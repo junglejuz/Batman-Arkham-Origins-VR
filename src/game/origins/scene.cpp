@@ -3,7 +3,9 @@
 #include "scene.h"
 #include "afw.h"
 #include "dlss_bridge.h"
+#include "menu_state.h"
 #include "reflect.h"
+#include "core/vr/eye_burst.h"
 #include "core/framework/command.h"
 #include "core/gfx/gfx_hud.h"
 #include "core/gfx/hud_capture.h"
@@ -46,6 +48,8 @@ CtorFn ctorOriginal=nullptr;
 BeginFn beginOriginal=nullptr;
 uintptr_t imageBase=0;
 std::atomic<bool> installed{false},camera{true},native{true},poisoned{false},hudOn{true};
+std::atomic<bool> mapRec{false}; // MAPREC: record every map opening / closing (test only since RELEASE 0.1.0: `bo maprec on`)
+std::atomic<bool> viewDebounce{true}; // VIEWDEBOUNCE: one frame without a 3D view does not leave head-tracked mode
 std::atomic<W> gameplayCaller{0},lastViewCaller{0},draws{0},seconds{0},edits{0},invalid{0},begins{0},tagMiss{0};
 std::atomic<float> worldScale{90.0f},resolutionScale{1.0f};
 std::atomic<bool> recentre{true},captureRequested{false};
@@ -59,6 +63,7 @@ thread_local vr::HeadPose head{},eyes[2]{};
 thread_local float angles[2][4]{};
 thread_local unsigned afwNext=0;
 float refYaw=0,refPos[3]{};
+void settings_save(); // below
 struct M4 { float m[4][4]; };
 struct Tag { void* viewport; W gen; int sign; bool afw; W slot; };
 constexpr unsigned kTags=64;
@@ -154,6 +159,7 @@ W __fastcall begin_detour(void* self,void* edx) {
     vr::sr_set_present_gen(tag.gen);
     vr::sr_set_present_afw(tag.sign!=0 && tag.afw);
     gfx_hud::set_redirect(hudOn.load() && tag.sign!=0);
+    gfx_hud::note_eye_pass(tag.sign!=0,tag.sign);
     afw::set_render_slot(tag.slot);
     dlss_bridge::set_render_slot(tag.slot);
     reflect::set_render_pass(begins.load(),tag.sign);
@@ -175,9 +181,17 @@ void status() {
     for(auto& c:callers) if(c.address.load()) BVR_LOG("[bo] root caller RVA %08X: %u",c.address.load(),c.count.load());
     char line[1800]{}; afw::status_line(line,sizeof(line)); BVR_LOG("%s",line);
     dlss_bridge::status_line(line,sizeof(line)); BVR_LOG("%s",line);
+    menu_state::status_line(line,sizeof(line)); BVR_LOG("[bo] %s | MAPBLIT2 passes without a scene blit blanked %u",line,gfx_hud::map_blits_provisional());
     const auto hc=gfx_hud::census();
-    BVR_LOG("[bo] HUD: scene boundaries=%u, UI draws=%u, captured=%u, last-frame UI=%u",
-        hc.boundaries,hc.hudDraws,hc.redirected,hc.lastFrameHud);
+    uint32_t early=0,undone=0; gfx_hud::early_ui_stats(&early,&undone);
+    BVR_LOG("[bo] HUD: scene boundaries=%u, UI draws=%u, captured=%u, last-frame UI=%u | EARLYUI %d: passes without "
+        "the scene blit caught %u (blit came later %u) | EARLYSTRICT %d: full-screen pictures kept as UI %u, second scene blits %u | MAPBLIT %d: %u",hc.boundaries,hc.hudDraws,hc.redirected,hc.lastFrameHud,
+        gfx_hud::early_ui(),early,undone,gfx_hud::early_strict(),gfx_hud::early_kept(),gfx_hud::second_blits(),gfx_hud::map_blit(),gfx_hud::map_blits());
+    { uint32_t h=0,hu=0; gfx_hud::map_hold_stats(&h,&hu);
+      BVR_LOG("[bo] MAPHOLD %d: map passes replaced %u (untagged %u) | VIEWDEBOUNCE %d | MAPMONO %d: mono map presents kept from the headset %u",
+              gfx_hud::map_hold_on(),h,hu,viewDebounce.load()?1:0,vr::map_mono_skip()?1:0,vr::map_mono_skipped()); }
+    { uint32_t a=0,b=0,c=0; gfx_hud::map_safe_stats(&a,&b,&c);
+      BVR_LOG("[bo] MAPSAFE %d: starts %u (without the eye-pass flag %u), full-screen blits dropped %u",gfx_hud::map_safe(),a,b,c); }
     reflect::status();
     transitions::status();
 }
@@ -187,6 +201,11 @@ void __fastcall draw_detour(void* self,void* edx,W a1) {
     ++draws; note_caller(ra);
     command::poll_from_game_thread(GetTickCount64());
     if(GetAsyncKeyState(VK_F12)&1) recentre.store(true);
+    {   // Meta button held: the runtime recentred its space - take the current head as straight ahead (as City)
+        static uint32_t s_rtRecenters=vr::runtime_recenter_count();
+        const uint32_t n=vr::runtime_recenter_count();
+        if(n!=s_rtRecenters) { s_rtRecenters=n; recentre.store(true); BVR_LOG("[bo] runtime recentre (Meta button) - view recentred"); }
+    }
     if(GetAsyncKeyState(VK_F11)&1) set_camera(!camera.load());
     if(GetAsyncKeyState(VK_F2)&1) captureRequested.store(true);
     // Same raw head + both complete eye poses/FOVs, one generation, before either render.
@@ -202,7 +221,21 @@ void __fastcall draw_detour(void* self,void* edx,W a1) {
     }
     const bool eligible=installed.load() && camera.load() && native.load() && !poisoned.load() &&
         poseValid && gameplayCaller.load()!=0 && ra==gameplayCaller.load();
-    vr::set_camera_mode(eligible);
+    // VIEWDEBOUNCE2 (JJ 19:03: map flicker + "reset the centering" again; log 19:03:32.384: camera mode off -> ON in 18 ms
+    // with VIEWDEBOUNCE on): a draw root from ANOTHER caller (the map draws one now and then, e.g. RVA 002FDE22) made
+    // eligible false and switched camera mode off for one frame. While the gameplay caller drew in the last 300 ms, such a
+    // root leaves the camera mode alone (it still renders mono, untagged, as before).
+    static ULONGLONG s_lastGameplayRoot=0;
+    const ULONGLONG nowR=GetTickCount64();
+    if(eligible) s_lastGameplayRoot=nowR;
+    // VIEWDEBOUNCE3 (JJ 21:4x: "those same issues are still present"; log 21:40:07.635 / 16.426: camera off -> ON in 17 ms
+    // again, the same frames as the two untagged passes): the gameplay caller itself can be ineligible for one frame (no
+    // fresh pose generation). While head tracking and native stereo are wanted and not poisoned, any single ineligible root
+    // within 300 ms of an eligible one leaves camera mode alone; that frame renders mono (untagged) and on the map MAPMONO
+    // keeps it from the headset.
+    const bool foreignBlip=!eligible && viewDebounce.load() && camera.load() && native.load() && !poisoned.load() &&
+                           nowR-s_lastGameplayRoot<300;
+    if(!foreignBlip) vr::set_camera_mode(eligible);
     const bool active=eligible && vr::vr_camera_mode();
     viewportNow=self; ++depth; foundView=false;
     afwFrame=active && afw::on();
@@ -217,7 +250,13 @@ void __fastcall draw_detour(void* self,void* edx,W a1) {
     if(ordinary && !push_tag(self,eyeSign,afwFrame,poseGen)) eyeSign=0;
     drawOriginal(self,edx,a1);
     if(foundView) lastViewCaller.store(ra);
-    if(!foundView) vr::set_camera_mode(false); // startup movies / pure 2D roots use the room screen
+    // startup movies / pure 2D roots use the room screen. VIEWDEBOUNCE (JJ 2026-10-13: during a map flicker "it actually
+    // reset the centering of the VR field of view"; log 18:55:40.5 / 41.0: camera mode off -> ON twice within 20 ms = single
+    // map frames with no 3D view): only after the view has been missing for 300 ms, not on one frame. `bo viewdebounce 0|1`.
+    static ULONGLONG s_lastView=0;
+    const ULONGLONG nowV=GetTickCount64();
+    if(foundView) s_lastView=nowV;
+    else if(!foreignBlip && (!viewDebounce.load() || nowV-s_lastView>300)) vr::set_camera_mode(false);
     if(active && ordinary && foundView) {
         if(afwFrame) { afw::note_drawn(afwNext); afwNext^=1; }
         else {
@@ -227,10 +266,37 @@ void __fastcall draw_detour(void* self,void* edx,W a1) {
         }
     }
     eyeSign=0; afwFrame=false; --depth; viewportNow=nullptr;
-    static ULONGLONG previous=0;
-    if(GetTickCount64()-previous>5000) { previous=GetTickCount64(); status(); }
+    {   // RELEASE 0.1.0: a DLSS change made by the mod itself (no DLSS on this PC -> off) is saved, so the launcher's next start
+        // draws full size (City saves every change by itself; Origins saved only panel changes).
+        static int s_dlssSaved=-1; const int m=dlss_bridge::saved_mode();
+        if(s_dlssSaved<0) s_dlssSaved=m; else if(m!=s_dlssSaved) { s_dlssSaved=m; settings_save(); }
+    }
+    static ULONGLONG previous=0; // RELEASE 0.1.0: the heartbeat every 30 s, every 5 s with test options on
+    if(GetTickCount64()-previous>(overlay::show_tests() ? 5000u : 30000u)) { previous=GetTickCount64(); status(); }
+}
+// MAPREC (2026-10-13): a map visit's record - 10 s of eye pictures + HUD sheets (EYEBURST) and the per-present draw tracer
+// (EYB3/EYB4: every leaking eye picture with the draws that put it there). Since RELEASE 0.1.0 only from the TESTS drawer
+// or `bo maprec on` (then every map opening / closing records by itself, as in the test builds).
+void record_map(bool open) {
+    uint32_t a=0,b=0,c=0; gfx_hud::map_safe_stats(&a,&b,&c);
+    BVR_LOG("[bo] MAPREC: map %s (MAPSAFE %d: starts %u, without eye pass %u, blits dropped %u) - recording %s",
+            open ? "OPEN" : "closed",gfx_hud::map_safe(),a,b,c,open ? "10 s" : "5 s");
+    vr::eye_burst::start(open ? 1800 : 900); // ~10 s open, ~5 s after closing
+    if(open && !gfx_hud::leak_trace_running()) {
+        SYSTEMTIME st; GetLocalTime(&st);
+        wchar_t dir[MAX_PATH]{}; swprintf_s(dir,L"%s\\captures",log::data_dir()); CreateDirectoryW(dir,nullptr);
+        swprintf_s(dir,L"%s\\captures\\maptrace_%02d%02d%02d",log::data_dir(),st.wHour,st.wMinute,st.wSecond);
+        CreateDirectoryW(dir,nullptr);
+        gfx_hud::start_leak_trace(dir,10800); // the whole map visit (up to ~60 s)
+    }
 }
 void* __fastcall calc_detour(void* self,void* edx,void* family,float* loc,int32_t* rot,void* viewport,void* drawer) {
+    const bool mapNow=menu_state::live() && menu_state::screen_menu_open();
+    gfx_hud::set_menu_screen(mapNow); // MS3: MAPBLIT on the game's signal
+    {
+        static bool s_prevMap=false;
+        if(mapNow!=s_prevMap) { s_prevMap=mapNow; if(mapRec.load()) record_map(mapNow); }
+    }
     const bool ours=depth && viewport==viewportNow;
     if(ours) ++calcDepth;
     void* out=calcOriginal(self,edx,family,loc,rot,viewport,drawer);
@@ -299,54 +365,55 @@ bool signature(const Seam& seam) {
     BYTE actual[16]{};
     return safe(reinterpret_cast<void*>(imageBase+seam.rva),actual,16) && !memcmp(actual,expected,16);
 }
+void put(const wchar_t* path,const wchar_t* section,const wchar_t* key,float v) {
+    wchar_t text[40]{}; swprintf_s(text,L"%.2f",v);
+    WritePrivateProfileStringW(section,key,text,path);
+}
+void put_int(const wchar_t* path,const wchar_t* section,const wchar_t* key,int v) {
+    wchar_t text[16]{}; swprintf_s(text,L"%d",v);
+    WritePrivateProfileStringW(section,key,text,path);
+}
+float get(const wchar_t* path,const wchar_t* section,const wchar_t* key,float fallback) {
+    wchar_t text[64]{}; GetPrivateProfileStringW(section,key,L"",text,64,path);
+    return text[0] ? float(wcstod(text,nullptr)) : fallback;
+}
 void settings_save() {
     wchar_t path[MAX_PATH]{}; swprintf_s(path,L"%s\\settings.ini",log::data_dir());
-    wchar_t text[40]{};
-    swprintf_s(text,L"%.2f",worldScale.load());
-    WritePrivateProfileStringW(L"view",L"units_per_metre",text,path);
-    wchar_t scale[40]{}; swprintf_s(scale,L"%.2f",resolutionScale.load());
-    WritePrivateProfileStringW(L"launch",L"resolution_scale",scale,path);
-    wchar_t mode[16]{}; swprintf_s(mode,L"%d",dlss_bridge::saved_mode());
-    WritePrivateProfileStringW(L"launch",L"dlss",mode,path);
+    put(path,L"view",L"units_per_metre",worldScale.load());
+    put(path,L"launch",L"resolution_scale",resolutionScale.load());
+    put_int(path,L"launch",L"dlss",dlss_bridge::saved_mode());
     float d,w,u; vr::get_hud_quad(&d,&w,&u);
-    for(auto setting : {std::pair{L"distance",d},std::pair{L"width",w},std::pair{L"height",u}}) {
-        swprintf_s(text,L"%.2f",setting.second);
-        WritePrivateProfileStringW(L"hud",setting.first,text,path);
-    }
+    put(path,L"hud",L"distance",d); put(path,L"hud",L"width",w); put(path,L"hud",L"height",u);
+    // RELEASE 0.1.0 (City panel): the settings City's drawers offer, saved the same way.
+    put_int(path,L"hud",L"on_head",vr::hud_head_locked() ? 1 : 0);
+    float md=0,mw=0; vr::get_hud_menu_quad(&md,&mw);
+    put(path,L"hud",L"menu_distance",md); put(path,L"hud",L"menu_width",mw);
+    float sd=0,sw=0; vr::get_screen_quad(&sd,&sw);
+    put(path,L"screens",L"distance",sd); put(path,L"screens",L"width",sw);
+    float pw=0,pd=0; vr::get_panel_size(&pw,&pd);
+    put(path,L"screens",L"panel_width",pw); put(path,L"screens",L"panel_distance",pd);
+    put_int(path,L"stereo",L"afw",afw::on() ? 1 : 0); put_int(path,L"stereo",L"afw_mode",afw::mode());
+}
+void settings_load_panel(const wchar_t* path) {
+    vr::set_hud_head_locked(GetPrivateProfileIntW(L"hud",L"on_head",vr::hud_head_locked() ? 1 : 0,path)!=0);
+    float md=0,mw=0; vr::get_hud_menu_quad(&md,&mw);
+    md=get(path,L"hud",L"menu_distance",md); mw=get(path,L"hud",L"menu_width",mw);
+    if(md>=.5f && md<=10 && mw>=.5f && mw<=10) vr::set_hud_menu_quad(md,mw);
+    float sd=0,sw=0; vr::get_screen_quad(&sd,&sw);
+    sd=get(path,L"screens",L"distance",sd); sw=get(path,L"screens",L"width",sw);
+    if(sd>=.5f && sd<=10 && sw>=.5f && sw<=10) vr::set_screen_quad(sd,sw);
+    float pw=0,pd=0; vr::get_panel_size(&pw,&pd);
+    pw=get(path,L"screens",L"panel_width",pw); pd=get(path,L"screens",L"panel_distance",pd);
+    if(pw>=.3f && pw<=3 && pd>=.3f && pd<=4) vr::set_panel_size(pw,pd);
+    wchar_t v[16]{};
+    swprintf_s(v,L"%d",GetPrivateProfileIntW(L"stereo",L"afw",afw::on() ? 1 : 0,path));
+    char a[16]{}; WideCharToMultiByte(CP_ACP,0,v,-1,a,16,nullptr,nullptr); afw::settings_read("afw",a);
+    swprintf_s(v,L"%d",GetPrivateProfileIntW(L"stereo",L"afw_mode",afw::mode(),path));
+    WideCharToMultiByte(CP_ACP,0,v,-1,a,16,nullptr,nullptr); afw::settings_read("afw_mode",a);
 }
 }
-namespace {
-// MENUTEST (JJ 2026-10-11: in the database a skewed copy of the screen flickers on the left, the whole time).
-// One button / command runs every candidate on a timer: 10 s each, a capture mid-step, a log line per step,
-// then restores. JJ says afterwards in which step the copy was gone. Steps: 1 normal (control) 2 one HUD
-// copy shown to both eyes (per-eye quad pair off) 3 AFW (one eye drawn per frame) 4 menu drawn straight
-// into the eye pictures (no HUD layer).
-std::atomic<bool> menuTestRunning{false};
-DWORD WINAPI menu_test(void*) {
-    const bool wasHud=hudOn.load(),wasNative=native.load(),wasAfw=afw::on(); const int wasEyes=vr::hud_eyes();
-    const char* names[]={"1/4 normal (control)","2/4 one HUD copy for both eyes","3/4 one eye drawn per frame (AFW: the HUD drawn once per frame)",
-        "4/4 menu drawn into the eye pictures (no HUD layer)"};
-    for(int step=0;step<4;step++) {
-        hudOn.store(step!=3);
-        vr::set_hud_eyes(step==1 ? 0 : wasEyes);
-        if(step==2 || step==3) afw::set_on(step==2 ? true : wasAfw);
-        BVR_LOG("[bo] MENUTEST step %s",names[step]);
-        if(step==0) {
-            wchar_t dir[MAX_PATH]{}; swprintf_s(dir,L"%s\\captures\\menutest_sheets",log::data_dir());
-            CreateDirectoryW(dir,nullptr); gfx_hud::request_panel_sequence(dir,8);
-        }
-        Sleep(5000); captureRequested.store(true); Sleep(5000);
-    }
-    hudOn.store(wasHud); vr::set_hud_eyes(wasEyes); afw::set_on(wasAfw); if(native.load()!=wasNative) set_stereo(wasNative);
-    BVR_LOG("[bo] MENUTEST done - restored (hud %d, hud eyes %d, native %d)",wasHud,wasEyes,wasNative);
-    menuTestRunning.store(false);
-    return 0;
-}
-void start_menu_test() {
-    if(menuTestRunning.exchange(true)) return;
-    if(HANDLE t=CreateThread(nullptr,0,menu_test,nullptr,0,nullptr)) CloseHandle(t); else menuTestRunning.store(false);
-}
-}
+// RELEASE 0.1.0: the MENUTEST / MAPTRACE / MAPTEST2 timed test threads are removed (MAPTRACE and MAPTEST2 switched MAPBLIT /
+// MAPSAFE, both known to stick the map to the face in Origins). The map record stays as one TESTS-drawer button (record_map).
 bool install() {
     imageBase=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     Seam seams[]={
@@ -376,6 +443,7 @@ bool install() {
     }
     installed.store(true);
     reflect::install(imageBase); // optional: its own guard; a mismatch leaves stereo unaffected
+    menu_state::install();       // MENUSTATE probe: the game's own menu calls, logged by name
     // LIVE 2026-10-11: this Origins root caller produced thousands of native
     // pairs in the Cell Block A checkpoint with no tag misses or pair aborts.
     gameplayCaller.store(0x308607);
@@ -408,6 +476,7 @@ bool install() {
     worldScale.store(float(std::clamp(wcstod(text,nullptr),40.0,160.0)));
     GetPrivateProfileStringW(L"launch",L"resolution_scale",L"1",text,64,settings);
     resolutionScale.store(float(std::clamp(wcstod(text,nullptr),.6,1.8)));
+    settings_load_panel(settings);
     const wchar_t* cmd=GetCommandLineW();
     auto* outputX=wcsstr(cmd,L"-BOOutputX="); auto* outputY=wcsstr(cmd,L"-BOOutputY=");
     auto* modeArg=wcsstr(cmd,L"-BODLSS=");
@@ -470,7 +539,25 @@ bool handle_command(const char* args) {
     else if(!strcmp(args,"hud on")) hudOn.store(true);
     else if(!strcmp(args,"hud off")) { hudOn.store(false); gfx_hud::set_redirect(false); }
     else if(!strcmp(args,"capture")) captureRequested.store(true);
-    else if(!strcmp(args,"menutest")) start_menu_test();
+    else if(!strcmp(args,"maprecord")) record_map(true);
+    else if(!strcmp(args,"mapsafe on")) gfx_hud::set_map_safe(true);
+    else if(!strcmp(args,"mapsafe off")) gfx_hud::set_map_safe(false);
+    else if(!strcmp(args,"maprec on")) mapRec.store(true);
+    else if(!strncmp(args,"mapmono ",8)) vr::set_map_mono_skip(atoi(args+8)!=0);
+    else if(!strcmp(args,"maphold on")) gfx_hud::set_map_hold(true);
+    else if(!strcmp(args,"maphold off")) gfx_hud::set_map_hold(false);
+    else if(!strncmp(args,"viewdebounce ",13)) { viewDebounce.store(atoi(args+13)!=0); BVR_LOG("[bo] VIEWDEBOUNCE %d",viewDebounce.load()?1:0); }
+    else if(!strcmp(args,"maprec off")) mapRec.store(false);
+    else if(!strncmp(args,"eyeburst",8)) { const int n=args[8] ? atoi(args+8) : 540; vr::eye_burst::start(n); BVR_LOG("[bo] EYEBURST requested: %d presents",n); }
+    else if(!strcmp(args,"menuprobe")) menu_state::dump();
+    else if(!strcmp(args,"mapblit on")) gfx_hud::set_map_blit(true);
+    else if(!strncmp(args,"mapblit src ",12)) gfx_hud::set_map_blit_source(atoi(args+12));
+    else if(!strcmp(args,"menureset")) menu_state::clear_stale("bo menureset");
+    else if(!strcmp(args,"mapblit off")) gfx_hud::set_map_blit(false);
+    else if(!strcmp(args,"earlyui on")) gfx_hud::set_early_ui(true);
+    else if(!strcmp(args,"earlyui off")) gfx_hud::set_early_ui(false);
+    else if(!strcmp(args,"earlystrict on")) gfx_hud::set_early_strict(true);
+    else if(!strcmp(args,"earlystrict off")) gfx_hud::set_early_strict(false);
     else if(!strncmp(args,"hudeyes ",8)) { vr::set_hud_eyes(atoi(args+8)); BVR_LOG("[bo] HUD per-eye copies %d",vr::hud_eyes()); }
     else if(!strcmp(args,"recenter")) recentre.store(true);
     else if(!strncmp(args,"afw ",4)) return afw::command(args+4);
@@ -480,51 +567,127 @@ bool handle_command(const char* args) {
     else return false;
     return true;
 }
+// RELEASE 0.1.0 (JJ 2026-10-14: "clean up unneeded options in the panel and make the panel consistent with arkham city"):
+// City's layout (batman_city scene.cpp draw_ui, from AKVR's TIDY4/DRAWERS) - status, Recenter / Save capture / Head
+// tracking, controller hint, closed drawers of player settings in plain words (PANELWORDS), and everything for testing in
+// ONE drawer at the bottom. Dropped from the panel (commands remain): "Show game on a screen" (= head tracking off), "Turn
+// 3D on" (the owner is fixed at start), the flat HUD switch (`bo hud off`: one picture in both eyes cannot be fused,
+// VR_ESSENTIALS 6), the MAPSAFE switch (`bo mapsafe on`: stuck the map to the face) and the timed MAPTEST2 recorder.
 void draw_ui() {
-    ImGui::TextUnformatted("BATMAN ORIGINS VR - development build");
-    if(!installed.load()) { ImGui::TextWrapped("Engine guard failed. Headset screen remains available."); return; }
-    if(poisoned.load()) ImGui::TextWrapped("Stereo stopped after an engine fault or label overflow. Restart required.");
-    if(!gameplayCaller.load()) {
-        ImGui::TextWrapped("Enter gameplay, then activate native stereo for the current viewport.");
-        if(ImGui::Button("Activate native stereo in gameplay")) set_stereo(true);
+    constexpr float kPi=3.14159265f;
+    const ImVec4 kGreen(0.3f,1.0f,0.55f,1.0f),kAmber(1.0f,0.7f,0.25f,1.0f);
+    static ULONGLONG s_rateT=0; static W s_rateDraws=0; static float s_fps=0;
+    {   const ULONGLONG now=GetTickCount64();
+        if(now-s_rateT>=1000) { const W d=draws.load(); if(s_rateT) s_fps=float(d-s_rateDraws)*1000.0f/float(now-s_rateT); s_rateT=now; s_rateDraws=d; } }
+    ImGui::TextColored(ImVec4(1.0f,0.85f,0.2f,1.0f),"Batman Origins VR");
+    ImGui::SameLine();
+    ImGui::TextDisabled("   build: " __DATE__ " " __TIME__);
+    if(!installed.load()) {
+        ImGui::TextColored(kAmber,"This game version is not supported: the game is shown on a screen in the room.");
+        return;
     }
-    if(ImGui::CollapsingHeader("STEREO RENDERING",ImGuiTreeNodeFlags_DefaultOpen)) {
-        bool on=native.load() && gameplayCaller.load()!=0;
-        if(ImGui::RadioButton("Native (both eyes drawn every frame)",on && !afw::on())) { afw::set_on(false); set_stereo(true); }
-        if(ImGui::RadioButton("AFW (one eye drawn per frame, the other warped)",on && afw::on())) { afw::set_on(true); set_stereo(true); }
-        if(afw::on()) afw::draw_ui();
+    {
+        const bool vrOn=vr::session_live() && vr::vr_camera_mode();
+        ImGui::TextColored(vrOn ? kGreen : kAmber,"%s",vrOn ? "VR on" : (vr::session_live() ? "VR connected, not showing yet" : "VR not connected"));
+        ImGui::SameLine();
+        const bool st=native.load() && !poisoned.load();
+        ImGui::TextDisabled("|  %.0f fps  |  %s  |  head tracking %s",s_fps,
+                            !st ? "3D off" : (afw::on() ? "3D, one eye drawn per frame (AFW)" : "true 3D, both eyes every frame"),
+                            camera.load() ? "on" : "OFF (F11)");
     }
+    if(poisoned.load()) ImGui::TextColored(kAmber,"3D switched itself off after an error. Restart the game to get it back.");
+    if(ImGui::Button("Recenter  (F12)")) recentre.store(true);
+    ImGui::SameLine();
+    if(ImGui::Button("Save capture  (F2)")) captureRequested.store(true);
+    ImGui::SameLine();
+    if(ImGui::Button(camera.load() ? "Head tracking: ON  (F11)" : "Head tracking: OFF  (F11)")) set_camera(!camera.load());
+    ImGui::TextDisabled("controller: left stick / d-pad = move, A = select / change, B = back, both stick clicks = close");
+    ImGui::Separator();
+
+    ImGui::SetNextItemOpen(true,ImGuiCond_Once);
+    if(ImGui::CollapsingHeader("STEREO RENDERING")) {
+        const bool was=afw::on();
+        const int wasMode=afw::mode();
+        afw::draw_ui();
+        if(afw::on()!=was || afw::mode()!=wasMode) { if(!native.load()) set_stereo(true); settings_save(); }
+    }
+    ImGui::SetNextItemOpen(false,ImGuiCond_Once);
     if(ImGui::CollapsingHeader("VIEW")) {
-        bool on=camera.load(); if(ImGui::Checkbox("Head tracking",&on)) set_camera(on);
-        float scale=worldScale.load(); if(overlay::SliderStep("World scale (units per metre)",&scale,40,160,"%.0f")) { worldScale.store(scale); settings_save(); }
-        if(ImGui::Button("Recentre (F12)")) recentre.store(true);
-        if(ImGui::Button("Show game on a screen")) set_camera(false);
-        reflect::draw_ui();
+        float scale=worldScale.load();
+        if(overlay::SliderStep("world scale  (higher = the world looks smaller)",&scale,40,160,"%.0f")) { worldScale.store(scale); settings_save(); }
     }
+    ImGui::SetNextItemOpen(false,ImGuiCond_Once);
     if(ImGui::CollapsingHeader("HUD")) {
-        bool on=hudOn.load(); if(ImGui::Checkbox("HUD at depth",&on)) hudOn.store(on);
-        float d,w,u; vr::get_hud_quad(&d,&w,&u); bool changed=false;
-        changed |= overlay::SliderStep("HUD distance (m)",&d,.5f,10);
-        changed |= overlay::SliderStep("HUD width (m)",&w,.5f,8);
-        changed |= overlay::SliderStep("HUD height (m)",&u,-1,1);
-        if(changed) { vr::set_hud_quad(d,w,u); settings_save(); }
-        if(ImGui::Button(menuTestRunning.load() ? "Menu flicker test running..." : "Menu flicker test (40 s, open the menu first)"))
-            start_menu_test();
+        bool hh=vr::hud_head_locked();
+        if(ImGui::Checkbox("attach UI to head movement",&hh)) { vr::set_hud_head_locked(hh); settings_save(); }
+        // City's HUDDIST controls: the panel is set by its distance and the angle it covers, so moving it nearer or further
+        // keeps its size in view (width = 2 x distance x tan(angle / 2)); the height offset scales with the distance too.
+        float q[3]; vr::get_hud_quad(&q[0],&q[1],&q[2]);
+        float deg=2.0f*std::atan(0.5f*q[1]/q[0])*180.0f/kPi;
+        const float d0=q[0];
+        bool ch=overlay::SliderStep("HUD distance (m)",&q[0],0.5f,8.0f,"%.2f");
+        ch|=overlay::SliderStep("HUD size (degrees of your view)",&deg,30.0f,120.0f,"%.0f");
+        float upDeg=std::atan(q[2]/d0)*180.0f/kPi;
+        ch|=overlay::SliderStep("HUD height (degrees, + up)",&upDeg,-30.0f,30.0f,"%.0f");
+        if(ch) {
+            q[1]=2.0f*q[0]*std::tan(0.5f*deg*kPi/180.0f);
+            q[2]=q[0]*std::tan(upDeg*kPi/180.0f);
+            vr::set_hud_quad(q[0],q[1],q[2]); vr::recenter_panel(); settings_save();
+        }
+        float md=0,mw=0; vr::get_hud_menu_quad(&md,&mw);
+        float mdeg=2.0f*std::atan(0.5f*mw/md)*180.0f/kPi;
+        bool mc=overlay::SliderStep("pause / map screen distance (m)",&md,0.5f,8.0f,"%.2f");
+        mc|=overlay::SliderStep("pause / map screen size (degrees)",&mdeg,30.0f,120.0f,"%.0f");
+        if(mc) { vr::set_hud_menu_quad(md,2.0f*md*std::tan(0.5f*mdeg*kPi/180.0f)); settings_save(); }
     }
-    if(ImGui::CollapsingHeader("MENUS AND SCREENS")) { bool on=vr::screen_room(); if(ImGui::Checkbox("Room-fixed screen",&on)) vr::set_screen_room(on); }
-    if(ImGui::CollapsingHeader("BAT TRANSITIONS")) transitions::draw_ui();
+    ImGui::SetNextItemOpen(false,ImGuiCond_Once);
+    if(ImGui::CollapsingHeader("MENUS AND SCREENS")) {
+        transitions::draw_ui();
+        float d=0,w=0; vr::get_screen_quad(&d,&w);
+        bool ch=overlay::SliderStep("movie / loading screen distance (m)",&d,0.8f,6.0f,"%.2f");
+        ch|=overlay::SliderStep("movie / loading screen size (m)",&w,0.8f,6.0f,"%.2f");
+        if(ch) { vr::set_screen_quad(d,w); settings_save(); }
+        float pw=0,pd=0; vr::get_panel_size(&pw,&pd);
+        bool pc=overlay::SliderStep("this menu: distance (m)",&pd,0.6f,3.0f,"%.2f");
+        pc|=overlay::SliderStep("this menu: size (m)",&pw,0.5f,2.0f,"%.2f");
+        if(pc) { vr::set_panel_size(pw,pd); settings_save(); }
+    }
+    ImGui::SetNextItemOpen(false,ImGuiCond_Once);
     if(ImGui::CollapsingHeader("VR RESOLUTION")) {
-        unsigned w=0,h=0; vr::recommended_eye_size(&w,&h);
-        ImGui::Text("Runtime %ux%u; actual scene %ux%u",w,h,backW.load(),backH.load());
-        float s=resolutionScale.load(); if(overlay::SliderStep("Resolution scale",&s,.6f,1.8f)) { resolutionScale.store(s); settings_save(); }
-        ImGui::TextUnformatted("Resolution changes apply at next VR launch.");
+        uint32_t w=0,h=0; vr::recommended_eye_size(&w,&h);
+        float s=resolutionScale.load();
+        if(overlay::SliderStep("picture size  (x the headset's own size)",&s,.6f,1.8f,"%.2f")) { resolutionScale.store(s); settings_save(); }
+        ImGui::TextDisabled("   takes effect the next time the game starts");
+        if(w && h) ImGui::TextDisabled("   the headset asks for %ux%u per eye; the game draws %ux%u now",w,h,backW.load(),backH.load());
     }
+    ImGui::SetNextItemOpen(false,ImGuiCond_Once);
     if(ImGui::CollapsingHeader("DLSS (SMOOTHER EDGES)")) {
         const int before=dlss_bridge::saved_mode(); dlss_bridge::draw_ui();
         if(before!=dlss_bridge::saved_mode()) settings_save();
     }
-    if(ImGui::Button("Capture both eyes (F2)")) captureRequested.store(true);
-    ImGui::Text("Views changed %u; second renders %u; caller %08X",edits.load(),seconds.load(),gameplayCaller.load());
+    ImGui::SetNextItemOpen(false,ImGuiCond_Once);
+    if(ImGui::CollapsingHeader("Keyboard shortcuts")) {
+        ImGui::TextDisabled("F10 or both stick clicks - this menu\nF12 - recenter (or hold the headset's menu / Meta button)\n"
+                            "F11 - head tracking on/off\nF2 - save a capture (both eyes and the HUD panel)");
+    }
+    // The one place for tests (JJ 2026-10-14: "keep other tests that might be needed down the line - in a drawer at the
+    // bottom of the vr panel"). Nothing in here runs by itself.
+    ImGui::SetNextItemOpen(false,ImGuiCond_Once);
+    if(ImGui::CollapsingHeader("TESTS  (only when asked - leave alone)")) {
+        ImGui::TextDisabled("For finding bugs. Leave these as they are unless a test asks for them.");
+        bool st=overlay::show_tests(); if(ImGui::Checkbox("show test numbers in the other drawers",&st)) overlay::set_show_tests(st);
+        reflect::draw_ui();
+        bool mh=gfx_hud::map_hold_on(); if(ImGui::Checkbox("map flicker fix (leave on)",&mh)) gfx_hud::set_map_hold(mh);
+        if(ImGui::Button("Record the map for 10 s  (open the map first)")) record_map(true);
+        ImGui::SameLine();
+        if(ImGui::Button("Record both eyes for 3 s")) { vr::eye_burst::start(540); BVR_LOG("[bo] EYEBURST requested from the panel: 540 presents"); }
+        transitions::draw_test_ui();
+        ImGui::TextDisabled("views changed %u, second renders %u, tag misses %u, caller %08X",edits.load(),seconds.load(),
+                            tagMiss.load(),gameplayCaller.load());
+        uint32_t hold=0,holdU=0; gfx_hud::map_hold_stats(&hold,&holdU);
+        ImGui::TextDisabled("map passes replaced %u, mono map frames kept from the headset %u",hold,vr::map_mono_skipped());
+        ImGui::TextDisabled("records and captures go to %%LOCALAPPDATA%%\\Batman_Origins\\captures");
+    }
 }
 
 // Offline contract check against the ACTUAL Origins forwarding detour, not a duplicate wrapper.

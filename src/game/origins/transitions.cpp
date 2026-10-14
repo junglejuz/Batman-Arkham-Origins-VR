@@ -24,6 +24,20 @@ Post original[3]{};
 DWORD batEvent=0;
 std::atomic<bool> enabled{true},recordNext{false};
 std::atomic<float> distance{.8f},zoom{1.6f};
+// EYEBATS (JJ 2026-10-13): the bats and the black are painted into each finished eye image (full view, like City)
+// instead of a separate quad layer, which Virtual Desktop showed as a window. eyeZoom = the recording's size against
+// the eye's field of view (City's in-eye 1.6; the old quad "enlargement" is kept only for the self-test).
+std::atomic<float> eyeZoom{1.6f};
+std::atomic<uint64_t> lastEyeMs{0},lastProjectionMs{0};
+std::atomic<uint32_t> eyePaints{0};
+int64_t lastFrame=-1;uint64_t lastTickMs=0;
+// BOOTBLACK (JJ 2026-10-13: "a black window that appears after the title screen video and before the first menu"):
+// after the opening movies Origins covers its UI stage with plain untextured fills (~1.6 s, O1H log 23:47:34-35.6:
+// HUD frames of 1-2 untextured draws, nothing else) = a full-screen black in 2D, a black window on the VR panel.
+// Until the first menu is up, a UI frame of ONLY untextured draws makes the whole view black (City BLACKFILL).
+std::atomic<bool> bootDone{false};
+std::atomic<uint32_t> frameTextured{0},frameUntextured{0};
+uint64_t bootBlackUntil=0;unsigned texturedRun=0,bootBlackLogs=0;
 std::atomic<uint64_t> eventAt{0},originalUntil{0};
 std::atomic<unsigned> events{0},draws{0},frames{0};
 bool liveHooks=false,assetAttempted=false,assetReady=false,thisFrame=false;
@@ -32,7 +46,7 @@ ID3D11Device* owner=nullptr;
 ID3D11Texture2D *source=nullptr,*mask=nullptr,*colourUi=nullptr,*colourSource=nullptr;
 ID3D11ShaderResourceView *sourceSrv=nullptr,*colourSourceSrv=nullptr;
 ID3D11RenderTargetView *maskRtv=nullptr,*colourUiRtv=nullptr;
-unsigned colourW=0,colourH=0,autoCapturedEvent=0;
+unsigned colourW=0,colourH=0;
 wipe::Recording recording;
 wipe::Playback playback;
 wipe::Step lastStep;
@@ -111,43 +125,59 @@ DWORD __cdecl post_w(DWORD name,DWORD obj,DWORD flags,void* cb,void* cookie,DWOR
     return original[2](name,obj,flags,cb,cookie,n,ext,playing);
 }
 
-bool ensure_targets(ID3D11DeviceContext* ctx) {
+// The recording's one-channel frame texture (shared by the eye painter and the self-test's coverage target).
+bool ensure_source(ID3D11DeviceContext* ctx) {
     if(!ctx || !load_recording()) return false;
-    unsigned w=checkW,h=checkH;
-    if(!w && !vr::output_eye_size(&w,&h) && !vr::recommended_eye_size(&w,&h)) return false;
-    if(w<32 || h<32 || w>8192 || h>8192) return false;
     ID3D11Device* dev=nullptr;ctx->GetDevice(&dev);
-    if(mask && owner==dev && outW==w && outH==h) {dev->Release();return true;}
+    if(source && owner==dev) {dev->Release();return true;}
     release_targets();owner=dev;
     D3D11_TEXTURE2D_DESC td{};td.Width=recording.width;td.Height=recording.height;
     td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;
     td.Format=DXGI_FORMAT_R8_UNORM;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
     bool ok=SUCCEEDED(dev->CreateTexture2D(&td,nullptr,&source)) &&
         SUCCEEDED(dev->CreateShaderResourceView(source,nullptr,&sourceSrv));
-    td.Width=w;td.Height=h;td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
-    td.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
-    ok=ok && SUCCEEDED(dev->CreateTexture2D(&td,nullptr,&mask)) &&
-        SUCCEEDED(dev->CreateRenderTargetView(mask,nullptr,&maskRtv));
     if(ok) {
         frame_inspector::ScopedSuppress quiet;
-        if(recording.decode_frame(0,pixels)) {
-            ctx->UpdateSubresource(source,0,nullptr,pixels.data(),recording.width,0);frameIndex=0;
-            const float clear[4]{};ctx->ClearRenderTargetView(maskRtv,clear);
-            ok=blit::mask_black(ctx,maskRtv,w,h,sourceSrv,1.f);
-        } else ok=false;
+        ok=recording.decode_frame(0,pixels);
+        if(ok) {ctx->UpdateSubresource(source,0,nullptr,pixels.data(),recording.width,0);frameIndex=0;}
     }
-    if(!ok) {release_targets();BVR_LOG("[bo bats] replay resource/shader failed; original UI retained");return false;}
+    if(!ok) {release_targets();BVR_LOG("[bo bats] replay resource failed; original UI retained");return false;}
+    return true;
+}
+bool ensure_targets(ID3D11DeviceContext* ctx) {
+    if(!ensure_source(ctx)) return false;
+    unsigned w=checkW,h=checkH;
+    if(!w && !vr::output_eye_size(&w,&h) && !vr::recommended_eye_size(&w,&h)) return false;
+    if(w<32 || h<32 || w>8192 || h>8192) return false;
+    if(mask && outW==w && outH==h) return true;
+    drop(maskRtv);drop(mask);outW=outH=0;
+    D3D11_TEXTURE2D_DESC td{};td.Width=w;td.Height=h;td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;
+    td.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+    bool ok=SUCCEEDED(owner->CreateTexture2D(&td,nullptr,&mask)) &&
+        SUCCEEDED(owner->CreateRenderTargetView(mask,nullptr,&maskRtv));
+    if(ok) {
+        frame_inspector::ScopedSuppress quiet;
+        const float clear[4]{};ctx->ClearRenderTargetView(maskRtv,clear);
+        ok=blit::mask_black(ctx,maskRtv,w,h,sourceSrv,1.f);
+    }
+    if(!ok) {drop(maskRtv);drop(mask);BVR_LOG("[bo bats] replay resource/shader failed; original UI retained");return false;}
     outW=w;outH=h;
     BVR_LOG("[bo bats] animated coverage %ux%u -> %ux%u output, independent of DLSS",recording.width,recording.height,w,h);
     return true;
 }
 bool owns(ID3D11DeviceContext* ctx) {
     const auto now=GetTickCount64();synchronize(now);
-    return permitted(now) && playback.owns() && ensure_targets(ctx);
+    return permitted(now) && playback.owns() && ensure_source(ctx);
 }
 bool draw(ID3D11DeviceContext* ctx,unsigned,bool,gfx_hud::Decision& d) {
+    // BOOTBLACK: what this UI frame is made of, until the first menu is up.
+    if(!bootDone.load(std::memory_order_relaxed)) {
+        ID3D11ShaderResourceView* srv=nullptr;ctx->PSGetShaderResources(0,1,&srv);
+        if(srv) {srv->Release();frameTextured.fetch_add(1);} else frameUntextured.fetch_add(1);
+    }
     // Observe the proved UI lane, but NEVER discard the original bat/menu
-    // drawing. Filter its black coverage only after a replacement was copied.
+    // drawing. The floating panel is withheld while the eyes hold the bats.
     if(owns(ctx)) draws.fetch_add(1);
     return false;
 }
@@ -175,27 +205,73 @@ ID3D11Texture2D* filter_ui(ID3D11DeviceContext* ctx,ID3D11Texture2D* ui) {
     return blit::transition_part(ctx,colourUiRtv,colourW,colourH,colourSourceSrv,1,false) ? colourUi:ui;
 }
 ID3D11Texture2D* hud_texture(ID3D11DeviceContext* ctx) {
+    // EYEBATS: while the eyes hold the bats / black, no floating panel - it would sit over them as a window (City
+    // WIPEPANEL). For 1.5 s after, only its coloured UI: the game's own bats may still be finishing on the sheet.
+    const uint64_t since=GetTickCount64()-lastEyeMs.load(std::memory_order_relaxed);
+    if(since<100) return nullptr;
     auto* ui=gfx_hud::texture(ctx);
-    // Failed XR setup/copy keeps the untouched original sheet and its bats.
-    return thisFrame && vr::transition_layer_ready() ? filter_ui(ctx,ui):ui;
+    return since<1500 ? filter_ui(ctx,ui):ui;
 }
 float smooth(float x) {x=std::clamp(x,0.f,1.f);return x*x*(3-2*x);}
-bool render_step(ID3D11DeviceContext* ctx,const wipe::Step& step) {
-    frame_inspector::ScopedSuppress quiet;
-    const float clear[4]={0,0,0,step.visual==wipe::Visual::Black ? 1.f:0.f};
-    ctx->ClearRenderTargetView(maskRtv,clear);
-    if(step.visual!=wipe::Visual::Animation) return true;
-    const auto it=std::upper_bound(recording.times.begin(),recording.times.end(),step.elapsed);
+bool update_source(ID3D11DeviceContext* ctx,uint64_t elapsed) {
+    const auto it=std::upper_bound(recording.times.begin(),recording.times.end(),elapsed);
     const unsigned index=it==recording.times.begin()?0:unsigned(it-recording.times.begin()-1);
     if(index!=frameIndex) {
         if(!recording.decode_frame(index,pixels)) return false;
         ctx->UpdateSubresource(source,0,nullptr,pixels.data(),recording.width,0);frameIndex=index;
     }
-    // Finish at an exact clear/opaque endpoint without normalizing away bats
-    // or shrinking the recorded image's animated gaps into a box.
-    const float tail=smooth(float(int64_t(step.elapsed)-int64_t(recording.times.back()-120))/120.f);
+    return true;
+}
+// Finish at an exact clear/opaque endpoint without normalizing away bats
+// or shrinking the recorded image's animated gaps into a box.
+float tail_of(const wipe::Step& step) {
+    return smooth(float(int64_t(step.elapsed)-int64_t(recording.times.back()-120))/120.f);
+}
+bool render_step(ID3D11DeviceContext* ctx,const wipe::Step& step) {
+    frame_inspector::ScopedSuppress quiet;
+    const float clear[4]={0,0,0,step.visual==wipe::Visual::Black ? 1.f:0.f};
+    ctx->ClearRenderTargetView(maskRtv,clear);
+    if(step.visual!=wipe::Visual::Animation) return true;
+    if(!update_source(ctx,step.elapsed)) return false;
+    const float tail=tail_of(step);
     return blit::mask_black(ctx,maskRtv,outW,outH,sourceSrv,zoom.load(),step.invert,
         step.invert ? 1-tail:1.f,step.invert ? 0.f:tail);
+}
+// EYEBATS: called by the runtime for every finished headset eye image (after DLSS / AFW / room screen).
+bool paint_eye(ID3D11DeviceContext* ctx,int,ID3D11RenderTargetView* rtv,uint32_t w,uint32_t h,
+               float shiftX,float shiftY,bool projection,int64_t frame) {
+    const auto now=GetTickCount64();
+    if(projection) lastProjectionMs.store(now);
+    synchronize(now);
+    if(!ctx || !rtv || !permitted(now)) return false;
+    frame_inspector::ScopedSuppress quiet;
+    if(!bootDone.load() && events.load()) {bootDone.store(true);BVR_LOG("[bo bats] BOOTBLACK done (title exit)");}
+    if(!bootDone.load() && projection && frameUntextured.load() && !frameTextured.load()) {
+        if(now>=bootBlackUntil && bootBlackLogs++<4)
+            BVR_LOG("[bo bats] BOOTBLACK: the game's full-screen black before the first menu -> whole view black");
+        bootBlackUntil=now+150;
+    }
+    bool black=!bootDone.load() && now<bootBlackUntil;
+    if(!black) {
+        if(!ensure_source(ctx)) return false;
+        // One step per XR frame: both eyes of a pair show the same picture, whichever is written first.
+        if(frame!=lastFrame || now-lastTickMs>40) {
+            lastFrame=frame;lastTickMs=now;
+            lastStep=playback.tick(now,projection,recording.times.back());
+        }
+        if(lastStep.visual==wipe::Visual::None) return false;
+        black=lastStep.visual==wipe::Visual::Black;
+    }
+    bool ok=true;
+    if(black) {const float k[4]={0,0,0,1};ctx->ClearRenderTargetView(rtv,k);}
+    else {
+        const float tail=tail_of(lastStep);
+        ok=update_source(ctx,lastStep.elapsed) &&
+            blit::mask_black(ctx,rtv,w,h,sourceSrv,eyeZoom.load(),lastStep.invert,
+                lastStep.invert ? 1-tail:1.f,lastStep.invert ? 0.f:tail,shiftX,shiftY);
+    }
+    if(ok) {lastEyeMs.store(now);thisFrame=true;eyePaints.fetch_add(1);}
+    return ok;
 }
 ID3D11Texture2D* texture(ID3D11DeviceContext* ctx,bool projection) {
     const auto now=GetTickCount64();synchronize(now);thisFrame=false;
@@ -206,15 +282,16 @@ ID3D11Texture2D* texture(ID3D11DeviceContext* ctx,bool projection) {
     thisFrame=true;frames.fetch_add(1);return mask;
 }
 void end(ID3D11DeviceContext* ctx) {
-    // One paired UI/mask evidence sample per first two real events. This
-    // captures the content behind the matte, which O1F's tests omitted.
-    if(liveHooks && appliedEvents && appliedEvents<=2 && appliedEvents!=autoCapturedEvent &&
-        thisFrame && lastStep.visual==wipe::Visual::Animation && lastStep.elapsed>=400) {
-        autoCapturedEvent=appliedEvents;
-        wchar_t dir[MAX_PATH]{};swprintf_s(dir,L"%s\\bat_layers_%llu_event_%u",log::data_dir(),GetTickCount64(),appliedEvents);
-        CreateDirectoryW(dir,nullptr);save_capture(ctx,dir);
-        BVR_LOG("[bo bats] paired raw UI / preserved UI / coverage saved in %ls",dir);
+    // BOOTBLACK ends for good once the first menu has drawn textured UI for 60 frames in the 3D view.
+    if(!bootDone.load()) {
+        const bool projNow=GetTickCount64()-lastProjectionMs.load()<100;
+        if(frameTextured.load() && projNow) {
+            if(++texturedRun>=60) {bootDone.store(true);BVR_LOG("[bo bats] BOOTBLACK done (first menu drawn)");}
+        } else if(frameUntextured.load()) texturedRun=0;
     }
+    frameTextured.store(0);frameUntextured.store(0);
+    // RELEASE 0.1.0: the automatic bat_layers_* sample of the first two events is removed; "Record next bat transition"
+    // in the TESTS drawer (`bo bats record`) saves the same pictures on request.
     if(thisFrame && appliedEvents!=recordedEvent && recordNext.exchange(false)) {
         recordedEvent=appliedEvents;
         swprintf_s(recordingDir,L"%s\\bat_transition_%llu",log::data_dir(),GetTickCount64());
@@ -233,7 +310,7 @@ void settings_save() {
     wchar_t path[MAX_PATH]{},v[48]{};swprintf_s(path,L"%s\\settings.ini",log::data_dir());
     WritePrivateProfileStringW(L"bats",L"enabled",enabled.load()?L"1":L"0",path);
     swprintf_s(v,L"%.2f",distance.load());WritePrivateProfileStringW(L"bats",L"distance",v,path);
-    swprintf_s(v,L"%.2f",zoom.load());WritePrivateProfileStringW(L"bats",L"enlargement",v,path);
+    swprintf_s(v,L"%.2f",eyeZoom.load());WritePrivateProfileStringW(L"bats",L"eye_enlargement",v,path);
 }
 }
 void enable_for_check(unsigned w,unsigned h) {
@@ -276,13 +353,15 @@ bool install() {
     enabled.store(GetPrivateProfileIntW(L"bats",L"enabled",1,path)!=0);
     GetPrivateProfileStringW(L"bats",L"distance",L"0.8",v,48,path);
     distance.store(std::clamp(float(wcstod(v,nullptr)),.4f,2.f));
-    GetPrivateProfileStringW(L"bats",L"enlargement",L"1.6",v,48,path);
-    zoom.store(std::clamp(float(wcstod(v,nullptr)),1.f,2.5f));
+    GetPrivateProfileStringW(L"bats",L"eye_enlargement",L"1.6",v,48,path);
+    eyeZoom.store(std::clamp(float(wcstod(v,nullptr)),1.f,2.5f));
     gfx_hud::set_draw_override(draw,nullptr,end,nullptr);
     gfx_hud::set_before_capture_hook(prepare);
-    vr::set_transition_texture_provider(texture);vr::set_transition_distance(distance.load());
+    // EYEBATS: painted into the eye images; the separate quad layer (shown as a window) is no longer submitted.
+    vr::set_transition_eye_painter(paint_eye);vr::set_transition_distance(distance.load());
     vr::set_hud_texture_provider(hud_texture);
-    BVR_LOG("[bo bats] Origins event hooks ready, id %u; full-view recorded bat animation, %.2f m, %.2fx",batEvent,distance.load(),zoom.load());
+    BVR_LOG("[bo bats] Origins event hooks ready, id %u; bats + black painted into both eyes (EYEBATS), %.2f m, %.2fx; BOOTBLACK on",
+        batEvent,distance.load(),eyeZoom.load());
     return true;
 }
 
@@ -293,19 +372,18 @@ void save_capture(ID3D11DeviceContext* ctx,const wchar_t* dir) {
     if(thisFrame && mask) {swprintf_s(path,L"%s\\transition_coverage.bmp",dir);gfx_hud::save_texture_bmp(ctx,mask,path);}
     swprintf_s(path,L"%s\\hud_last_frames.txt",dir);gfx_hud::save_hud_ring(path);
     swprintf_s(path,L"%s\\transition.txt",dir);FILE* f=nullptr;_wfopen_s(&f,path,L"w");
-    if(f) {fprintf(f,"event=%u events=%u phase=%u visual=%u elapsed=%llu frame=%u invert=%d\nsource=%ux%u output=%ux%u distance=%.2f enlargement=%.2f\nSeparate head-relative XR coverage quads; eye BMPs exclude those layers.\n",
+    if(f) {fprintf(f,"event=%u events=%u phase=%u visual=%u elapsed=%llu frame=%u invert=%d\nsource=%ux%u output=%ux%u distance=%.2f eye_enlargement=%.2f\nEYEBATS: bats/black painted into each eye image; the eye BMPs include them.\n",
         batEvent,events.load(),unsigned(playback.phase),unsigned(lastStep.visual),lastStep.elapsed,frameIndex,lastStep.invert,
-        recording.width,recording.height,outW,outH,distance.load(),zoom.load());fclose(f);}
-    const auto submit=vr::transition_status();
+        recording.width,recording.height,outW,outH,distance.load(),eyeZoom.load());fclose(f);}
     swprintf_s(path,L"%s\\submission.txt",dir);_wfopen_s(&f,path,L"w");
-    if(f) {fprintf(f,"generated=%u copied=%u submitted=%u failures=%u ready=%d\nThese count actual XR copy/layer calls; headset visibility is a separate verdict.\n",
-        submit.generated,submit.copied,submit.submitted,submit.failures,vr::transition_layer_ready());fclose(f);}
+    if(f) {fprintf(f,"EYEBATS: painted into the eye images (eye_left/eye_right.bmp here); eye paints %u, runtime eye draws %u\n",
+        eyePaints.load(),vr::transition_eye_draws());fclose(f);}
 }
 void status() {
-    BVR_LOG("[bo bats] hooks=%d on=%d event=%u signals=%u preserved-draws=%u frames=%u asset=%d phase=%u output=%ux%u",
-        liveHooks,enabled.load(),batEvent,events.load(),draws.load(),frames.load(),assetReady,unsigned(playback.phase),outW,outH);
-    const auto submit=vr::transition_status();
-    BVR_LOG("[bo bats] XR generated=%u copied=%u submitted=%u failed=%u",submit.generated,submit.copied,submit.submitted,submit.failures);
+    BVR_LOG("[bo bats] hooks=%d on=%d event=%u signals=%u preserved-draws=%u phase=%u eye-enlargement=%.2f distance=%.2f",
+        liveHooks,enabled.load(),batEvent,events.load(),draws.load(),unsigned(playback.phase),eyeZoom.load(),distance.load());
+    BVR_LOG("[bo bats] EYEBATS eye paints=%u (runtime %u); BOOTBLACK %s",eyePaints.load(),vr::transition_eye_draws(),
+        bootDone.load() ? "done":"waiting for the first menu");
 }
 bool command(const char* args) {
     if(!strcmp(args,"on")) enabled.store(true);
@@ -316,19 +394,23 @@ bool command(const char* args) {
     else return false;
     settings_save();return true;
 }
+// RELEASE 0.1.0: player settings here (MENUS AND SCREENS drawer), the test buttons in draw_test_ui (TESTS drawer).
 void draw_ui() {
-    bool on=enabled.load();if(ImGui::Checkbox("Full-view bat transitions",&on)) {enabled.store(on);settings_save();}
-    float d=distance.load(),z=zoom.load();bool changed=false;
-    changed |= overlay::SliderStep("Bat distance (m)",&d,.4f,2.f);
-    changed |= overlay::SliderStep("Bat enlargement",&z,1.f,2.5f);
-    if(changed) {distance.store(d);zoom.store(z);vr::set_transition_distance(d);settings_save();}
-    if(ImGui::Button("Original transitions for 15 seconds")) originalUntil.store(GetTickCount64()+15000);
-    const auto now=GetTickCount64(),until=originalUntil.load();
-    if(now<until) ImGui::Text("Original view: %u seconds remaining",unsigned((until-now+999)/1000));
+    bool on=enabled.load();if(ImGui::Checkbox("bat transitions over the whole view",&on)) {enabled.store(on);settings_save();}
+    float d=distance.load(),z=eyeZoom.load();bool changed=false;
+    changed |= overlay::SliderStep("bat transition distance (m)",&d,.4f,2.f);
+    changed |= overlay::SliderStep("bat transition size",&z,1.f,2.5f);
+    if(changed) {distance.store(d);eyeZoom.store(z);vr::set_transition_distance(d);settings_save();}
+    if(!liveHooks) ImGui::TextDisabled("   the game's own bat transitions are shown (this game version is not supported)");
+}
+void draw_test_ui() {
+    if(ImGui::Button("Original bat transitions for 15 s")) originalUntil.store(GetTickCount64()+15000);
+    ImGui::SameLine();
     if(ImGui::Button("Record next bat transition")) recordNext.store(true);
-    if(recordNext.load()) ImGui::TextUnformatted("Waiting for the next bat transition.");
-    ImGui::Text("Events %u; transition draws %u; output %ux%u",events.load(),draws.load(),outW,outH);
-    if(!liveHooks) ImGui::TextUnformatted("Transition event hooks unavailable; original view retained.");
+    const auto now=GetTickCount64(),until=originalUntil.load();
+    if(now<until) ImGui::Text("   original bat transitions: %u seconds left",unsigned((until-now+999)/1000));
+    if(recordNext.load()) ImGui::TextUnformatted("   waiting for the next bat transition");
+    ImGui::TextDisabled("bat transitions %u, painted into the eyes %u times",events.load(),eyePaints.load());
 }
 
 namespace {
@@ -502,6 +584,39 @@ extern "C" __declspec(dllexport) DWORD WINAPI BO_TransitionSelftest(ID3D11Device
             }
         }
         check(fixture,"full bat/menu composite fixture setup");
+        // EYEBATS: the per-eye shift moves the picture's centre exactly; BOOTBLACK blackens a whole eye image.
+        {
+            ID3D11Texture2D *eyeA=nullptr,*eyeB=nullptr;ID3D11RenderTargetView *rtvA=nullptr,*rtvB=nullptr;
+            td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+            bool eyeOk=SUCCEEDED(dev->CreateTexture2D(&td,nullptr,&eyeA)) && SUCCEEDED(dev->CreateRenderTargetView(eyeA,nullptr,&rtvA)) &&
+                SUCCEEDED(dev->CreateTexture2D(&td,nullptr,&eyeB)) && SUCCEEDED(dev->CreateRenderTargetView(eyeB,nullptr,&rtvB));
+            check(eyeOk,"eye image fixture");
+            if(eyeOk) {
+                const float white[4]={1,1,1,1};ctx->ClearRenderTargetView(rtvA,white);ctx->ClearRenderTargetView(rtvB,white);
+                check(update_source(ctx,recording.times[30]) && blit::mask_black(ctx,rtvA,96,104,sourceSrv,1.f) &&
+                    blit::mask_black(ctx,rtvB,96,104,sourceSrv,1.f,false,1.f,0.f,.25f,0.f),"shifted eye paint");
+                unsigned same=0,tested=0,differs=0;unsigned char a[4]{},b[4]{};
+                for(unsigned y=4;y<104;y+=10) for(unsigned x=4;x<70;x+=6) {
+                    if(!pixel_at(ctx,eyeA,a,x,y) || !pixel_at(ctx,eyeB,b,x+24,y)) continue;
+                    ++tested;same+=abs(int(a[0])-int(b[0]))<=2;
+                    unsigned char c2[4]{};if(pixel_at(ctx,eyeB,c2,x,y)) differs+=abs(int(a[0])-int(c2[0]))>40;
+                }
+                check(tested && same==tested,"eye shift moves the bats by exactly the requested quarter width");
+                check(differs>0,"shifted and unshifted eye pictures differ");
+                ctx->ClearRenderTargetView(rtvA,white);
+                const bool wasDone=bootDone.load();const unsigned wasEvents=events.load(),wasApplied=appliedEvents;
+                bootDone.store(false);events.store(0);appliedEvents=0;bootBlackUntil=0;
+                frameUntextured.store(1);frameTextured.store(0);
+                check(paint_eye(ctx,0,rtvA,96,104,.1f,0,true,7),"BOOTBLACK paints the eye");
+                for(auto xy : {std::pair<unsigned,unsigned>{0,0},{95,0},{0,103},{95,103},{48,52}})
+                    check(pixel_at(ctx,eyeA,c,xy.first,xy.second) && c[0]==0 && c[1]==0 && c[2]==0,"BOOTBLACK fills the whole eye");
+                frameUntextured.store(0);frameTextured.store(1);bootBlackUntil=0;ctx->ClearRenderTargetView(rtvA,white);
+                check(!paint_eye(ctx,0,rtvA,96,104,0,0,true,8) && pixel_at(ctx,eyeA,c,48,52) && c[0]==255,
+                    "textured menu frame is not blackened");
+                frameTextured.store(0);bootDone.store(wasDone);events.store(wasEvents);appliedEvents=wasApplied;
+            }
+            drop(rtvA);drop(rtvB);drop(eyeA);drop(eyeB);
+        }
         drop(preservedSrv);drop(maskSrv);drop(uiRtv);drop(finalRtv);drop(ui);drop(final);drop(xrCopy);
         ID3D11Buffer *v=nullptr,*s=nullptr;ctx->VSGetConstantBuffers(4,1,&v);ctx->PSGetConstantBuffers(4,1,&s);
         check(v==cb && s==cb,"VS/PS constant buffers restored");drop(v);drop(s);drop(cb);drop(dev);

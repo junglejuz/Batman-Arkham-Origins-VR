@@ -83,7 +83,7 @@ bool command(const char* args) {
 }
 void draw_ui() {
     bool v=on.load();
-    if(ImGui::Checkbox("Puddle reflections rendered for each eye",&v)) { on.store(v); save(); status(); }
-    if(!hooked.load()) ImGui::TextUnformatted("(reflection hook not installed - see log)");
+    if(ImGui::Checkbox("puddle reflections drawn for each eye (leave on)",&v)) { on.store(v); save(); status(); }
+    if(!hooked.load()) ImGui::TextDisabled("   (not available in this game version)");
 }
 }

@@ -53,6 +53,53 @@ ID3D11DepthStencilView* g_curDsv = nullptr; // weak, as last bound by the game
 ID3D11Resource* g_sceneDepth = nullptr;      // weak: the last full-size readable R24G8 depth the game bound (DLSS)
 ID3D11RenderTargetView* g_gameRtv = nullptr; // weak, the game's own rtv0
 bool g_pastBoundary = false;             // the eye blit landed this frame
+// EARLYUI (Origins 2026-10-11, JJ: a skewed copy of the database page flickering on the left): in the database the
+// game skips the scene blit in ~2-4 eye passes a second, so no boundary was found and the menu was drawn into that
+// eye picture. Now a backbuffer draw before any blit starts the UI run provisionally; if the real blit still comes
+// in the same pass, the provisional pieces are dropped (the full-screen blit would have covered them anyway).
+std::atomic<bool> g_earlyUi{true};
+bool g_provisional = false;
+// Set by the adapter when a stereo eye pass begins, cleared at Present: loading screens present WITHOUT an eye pass
+// while the redirect flag still holds the last pass's value (EARLYUI v1 swallowed the loading screen = black headset).
+std::atomic<bool> g_eyePassOpen{false};
+std::atomic<uint32_t> g_cEarlyUi{0}, g_cEarlyUndone{0};
+// EARLYSTRICT (Origins 2026-10-11, JJ's video of the map: a full-view grid still flashing outside the map window with
+// EARLYUI v2): the map's 3D grid is a backbuffer-size render target drawn by one full-screen quad, so it passes
+// is_boundary_blit. In a provisional pass it was taken as "the scene blit came after all": the menu pieces were
+// dropped and the grid went into the eye picture at screen pixels. Now the undo needs the SAME source picture as a
+// real scene blit (learnt from ordinary passes, where the blit comes before any UI); any other picture stays UI.
+std::atomic<bool> g_earlyStrict{true};
+IUnknown* g_sceneSrc[8] = {};            // weak identities of the scene blit's source pictures (most recent first)
+std::atomic<uint32_t> g_cEarlyKept{0};
+// EARLYSTRICT v2 (same day, LIVE 17:09: one scene source only, kept 0 while "blit came later" still rose in the map):
+// the map's grid is rendered into the scene's OWN picture and blitted a second time, after the first (black) blit. So
+// in ordinary passes a second blit of the scene picture after the boundary marks "map-type screen"; for 1 s after one,
+// a late scene blit in a provisional pass is that grid too and stays UI. Gameplay never blits the scene twice.
+ULONGLONG g_secondBlitMs = 0;
+ULONGLONG g_mapUntilMs = 0; // MAPSCREEN: map screen up until (render thread)
+// MS8 (JJ 23:39 HEADSET: with MAPBLIT on its real map signal "the map is now attached to the camera"): Origins' map is a
+// real 3D hologram the engine renders into each eye - MAPBLIT moved it onto the flat sheet. MAPTRACE had counted that 3D
+// map in the eye as a "leak". MAPBLIT is wrong for Origins: OFF by default (`bo mapblit on` for tests only).
+std::atomic<bool> g_mapBlit{false};     // MAPBLIT: on the map the scene blit goes on the sheet, the eye stays black
+// MAPFLAT / MS3 (2026-10-11 night: City's map copy is gone with MAPBLIT; in Origins MAPBLIT never acted on the map -
+// log 18:07: count stuck at 162 while the map was up - because its trigger, MAPSCREEN's big untextured shape, is City's
+// map art (and the 2103-index menu -> game bat shape, which blacked the eyes for 1.5 s entering the game). Source 1
+// (default) = the game's own menu signal: a screen menu (not the pause menu) Started with focus and not yet Closed
+// (MENUSTATE, set by the adapter). Source 0 = the old shape detector. `bo mapblit src 0|1`.
+std::atomic<bool> g_menuScreen{false};
+// MAPSAFE (2026-10-13, EYEBURST run 17:33: in the map every eye picture is pure black and the whole map is on the HUD
+// sheet - except single passes (2 in 3 s, one eye) where the WHOLE map went into the eye at screen pixels and only the
+// text reached the sheet = the flickering duplicate. In those passes the map pieces came before this pass's UI run had
+// started (EARLYUI needs the eye-pass flag; it did not fire there). While the game's own signal says a map-type screen
+// is open (MENUSTATE: BackScreen / Map), every backbuffer draw before the boundary starts the UI run at once (eye
+// cleared black), and a full-screen blit that arrives after such a start is dropped (the eye stays black, the sheet keeps
+// the map - EARLYSTRICT would have put that opaque blit ON the sheet). `bo mapsafe on|off`, default on.
+std::atomic<bool> g_mapSafe{false}; // OFF since JJ 17:45 ("the map became attached to my face ... can't exit"): test switch until understood
+std::atomic<uint32_t> g_cMapSafeStart{0}, g_cMapSafeNoPass{0}, g_cMapSafeSkip{0};
+std::atomic<int> g_mapBlitSrc{1};
+std::atomic<uint32_t> g_cMapBlit2{0}; // MS7: provisional (no scene blit) passes blanked on a screen menu
+std::atomic<uint32_t> g_cMapBlit{0};
+std::atomic<uint32_t> g_cSecondBlit{0};
 bool g_ourBound = false;                 // our capture RT is currently bound
 bool g_clearedThisFrame = false;
 // HUDDSV (ported from AKN 2026-10-09, VR_ESSENTIALS 6; JJ 2026-10-10 SteamVR: the compass "only seems to disappear when
@@ -359,6 +406,42 @@ bool is_boundary_blit(ID3D11DeviceContext* ctx) {
     }
     srv->Release();
     return ok;
+}
+
+// EARLYSTRICT: the picture a blit-shaped draw samples (weak identity) and its description.
+IUnknown* blit_source(ID3D11DeviceContext* ctx, D3D11_TEXTURE2D_DESC* td) {
+    ID3D11ShaderResourceView* srv = nullptr;
+    ctx->PSGetShaderResources(0, 1, &srv);
+    if (!srv) return nullptr;
+    ID3D11Resource* res = nullptr;
+    srv->GetResource(&res);
+    srv->Release();
+    if (!res) return nullptr;
+    IUnknown* id = canonical(res);
+    ID3D11Texture2D* tex = nullptr;
+    if (td && SUCCEEDED(res->QueryInterface(IID_PPV_ARGS(&tex))) && tex) { tex->GetDesc(td); tex->Release(); }
+    res->Release();
+    return id;
+}
+bool scene_source_known(IUnknown* id) {
+    for (IUnknown* s : g_sceneSrc) if (s && s == id) return true;
+    return false;
+}
+void learn_scene_source(ID3D11DeviceContext* ctx) {
+    D3D11_TEXTURE2D_DESC td{};
+    IUnknown* id = blit_source(ctx, &td);
+    if (!id || g_sceneSrc[0] == id) return;
+    const bool known = scene_source_known(id);
+    int i = 0;
+    while (i < 7 && g_sceneSrc[i] != id) ++i; // move to the front (drops the oldest when new)
+    for (; i > 0; --i) g_sceneSrc[i] = g_sceneSrc[i - 1];
+    g_sceneSrc[0] = id;
+    static int s_logged = 0;
+    if (!known && s_logged < 16) {
+        ++s_logged;
+        BVR_LOG("gfx_hud: scene blit source picture %p %ux%u fmt %d", static_cast<void*>(id), td.Width, td.Height,
+                int(td.Format));
+    }
 }
 
 // Batman City (JJ 2026-10-03: the grapple reticle showed black boxes on the HUD panel): the
@@ -1209,16 +1292,274 @@ ID3D11DepthStencilView* hud_dsv(ID3D11DeviceContext* ctx) {
     return g_hudDsv;
 }
 
+// LEAKTRACE (Origins 2026-10-11, JJ: the map grid still flashes outside the map window after EARLYUI v2 and EARLYSTRICT
+// v1/v2; the counters could not say which draw reaches the eye). While armed: one line per present (eye pass, decision
+// events, where every backbuffer draw went, the eye-bound draws listed), and an objective leak check: four full-width
+// strips of the eye picture read back a few frames later (any lit pixel in a menu = something reached the eye); the
+// first 4 leaking eye pictures are saved whole. Test tool, off unless started (panel button / `bo leaktrace`).
+std::atomic<int> g_leakArm{0}, g_leakLeft{0};
+std::atomic<uint32_t> g_leakFrames{0}, g_leakChecked{0};
+FILE* g_leakFile = nullptr;
+wchar_t g_leakDir[MAX_PATH] = {};
+int g_leakSaved = 0;
+int g_eyeSign = 0;
+struct LeakRec {
+    uint32_t draws, sheet, skip, eye, preEye;
+    char ev[24]; int evN;
+    char list[200]; int listN; int items;
+};
+LeakRec g_lr{};
+constexpr int kLeakSlots = 6;
+ID3D11Texture2D* g_leakStage[kLeakSlots] = {};
+ID3D11Texture2D* g_leakFull[kLeakSlots] = {};
+uint32_t g_leakSlotPresent[kLeakSlots] = {};
+bool g_leakPending[kLeakSlots] = {};
+DXGI_FORMAT g_leakFmt = DXGI_FORMAT_UNKNOWN;
+unsigned g_leakW = 0, g_leakH = 0;
+
+void trace_ev(char c) {
+    if (g_leakLeft.load(std::memory_order_relaxed) > 0 && g_lr.evN < 22) { g_lr.ev[g_lr.evN++] = c; g_lr.ev[g_lr.evN] = 0; }
+}
+void leak_release() {
+    for (int i = 0; i < kLeakSlots; ++i) {
+        if (g_leakStage[i]) { g_leakStage[i]->Release(); g_leakStage[i] = nullptr; }
+        if (g_leakFull[i]) { g_leakFull[i]->Release(); g_leakFull[i] = nullptr; }
+        g_leakPending[i] = false;
+    }
+}
+// Present thread, before the eye capture: read finished strips, then copy this present's strips + whole picture.
+void leak_tick(ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
+    for (int i = 0; i < kLeakSlots; ++i) {
+        if (!g_leakPending[i]) continue;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (ctx->Map(g_leakStage[i], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m) != S_OK) continue;
+        unsigned lit = 0, mx = 0;
+        for (unsigned y = 0; y < 32; ++y) {
+            const uint8_t* r = static_cast<const uint8_t*>(m.pData) + y * m.RowPitch;
+            for (unsigned x = 0; x < g_leakW; ++x) {
+                const uint8_t* p = r + x * 4;
+                const unsigned v = (std::max)(p[0], (std::max)(p[1], p[2]));
+                if (v > mx) mx = v;
+                if (v > 12) ++lit;
+            }
+        }
+        ctx->Unmap(g_leakStage[i], 0);
+        g_leakPending[i] = false;
+        g_leakChecked.fetch_add(1, std::memory_order_relaxed);
+        if (lit >= 8) {
+            g_leakFrames.fetch_add(1, std::memory_order_relaxed);
+            if (g_leakFile) fprintf(g_leakFile, "LEAK p%u lit %u max %u\n", g_leakSlotPresent[i], lit, mx);
+            if (g_leakSaved < 4) {
+                ++g_leakSaved;
+                wchar_t path[MAX_PATH];
+                swprintf_s(path, L"%s\\leak_p%05u.bmp", g_leakDir, g_leakSlotPresent[i]);
+                save_texture_bmp(ctx, g_leakFull[i], path);
+            }
+        }
+    }
+    ID3D11Texture2D* bb = nullptr;
+    if (FAILED(sc->GetBuffer(0, IID_PPV_ARGS(&bb))) || !bb) return;
+    D3D11_TEXTURE2D_DESC bd{};
+    bb->GetDesc(&bd);
+    const bool eightBit = bd.Format == DXGI_FORMAT_R8G8B8A8_UNORM || bd.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+                          bd.Format == DXGI_FORMAT_B8G8R8A8_UNORM || bd.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    if (!eightBit || bd.SampleDesc.Count != 1) {
+        static bool s_said = false;
+        if (!s_said) { s_said = true; BVR_LOG("gfx_hud: LEAKTRACE eye check off - picture format %d / %u samples", int(bd.Format), bd.SampleDesc.Count); }
+        bb->Release();
+        return;
+    }
+    if (!g_leakStage[0] || g_leakW != bd.Width || g_leakH != bd.Height || g_leakFmt != bd.Format) {
+        leak_release();
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        bool ok = dev != nullptr;
+        for (int i = 0; ok && i < kLeakSlots; ++i) {
+            D3D11_TEXTURE2D_DESC sd = bd;
+            sd.Height = 32; sd.MipLevels = 1; sd.ArraySize = 1; sd.Usage = D3D11_USAGE_STAGING;
+            sd.BindFlags = 0; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0;
+            D3D11_TEXTURE2D_DESC fd = bd;
+            fd.MipLevels = 1; fd.ArraySize = 1; fd.Usage = D3D11_USAGE_DEFAULT;
+            fd.BindFlags = D3D11_BIND_SHADER_RESOURCE; fd.CPUAccessFlags = 0; fd.MiscFlags = 0;
+            ok = SUCCEEDED(dev->CreateTexture2D(&sd, nullptr, &g_leakStage[i])) &&
+                 SUCCEEDED(dev->CreateTexture2D(&fd, nullptr, &g_leakFull[i]));
+        }
+        if (dev) dev->Release();
+        if (!ok) { leak_release(); bb->Release(); BVR_LOG("gfx_hud: LEAKTRACE could not make its textures"); return; }
+        g_leakW = bd.Width; g_leakH = bd.Height; g_leakFmt = bd.Format;
+    }
+    const int s = static_cast<int>(g_presents % kLeakSlots);
+    if (!g_leakPending[s]) {
+        for (unsigned k = 0; k < 4; ++k) {
+            const unsigned y0 = bd.Height * (k + 1) / 5;
+            const D3D11_BOX b{0, y0, 0, bd.Width, y0 + 8, 1};
+            ctx->CopySubresourceRegion(g_leakStage[s], 0, 0, k * 8, 0, bb, 0, &b);
+        }
+        ctx->CopyResource(g_leakFull[s], bb);
+        g_leakSlotPresent[s] = g_presents;
+        g_leakPending[s] = true;
+    }
+    bb->Release();
+}
+// Present thread, at the frame roll: write this present's line, start / end the trace.
+void leak_frame_end() {
+    if (g_leakLeft.load(std::memory_order_relaxed) > 0) {
+        if (g_leakFile)
+            fprintf(g_leakFile, "p%u t%llu eyepass %d sign %d redirect %d | ev %s | draws %u sheet %u hidden %u eye %u pre-eye %u |%s\n",
+                    g_presents, GetTickCount64() % 1000000ULL, g_eyePassOpen.load() ? 1 : 0, g_eyeSign,
+                    g_redirect.load() ? 1 : 0, g_lr.evN ? g_lr.ev : "-", g_lr.draws, g_lr.sheet, g_lr.skip, g_lr.eye,
+                    g_lr.preEye, g_lr.list);
+        if (g_leakLeft.fetch_sub(1) == 1) {
+            if (g_leakFile) { fclose(g_leakFile); g_leakFile = nullptr; }
+            BVR_LOG("gfx_hud: LEAKTRACE done - eye pictures checked %u, leaking %u (saved %d)", g_leakChecked.load(),
+                    g_leakFrames.load(), g_leakSaved);
+        }
+    }
+    g_lr = LeakRec{};
+    if (const int n = g_leakArm.exchange(0)) {
+        wchar_t path[MAX_PATH];
+        swprintf_s(path, L"%s\\leaktrace.txt", g_leakDir);
+        if (g_leakFile) fclose(g_leakFile);
+        g_leakFile = _wfopen(path, L"w");
+        g_leakSaved = 0;
+        g_leakLeft.store(n);
+        BVR_LOG("gfx_hud: LEAKTRACE started for %d presents -> %ls", n, path);
+    }
+}
+void srv0_size(ID3D11DeviceContext* ctx, unsigned* w, unsigned* h);
+
+Decision classify_inner(ID3D11DeviceContext* ctx, unsigned count, bool indexed);
 Decision classify(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
+    if (g_leakLeft.load(std::memory_order_relaxed) <= 0) return classify_inner(ctx, count, indexed);
+    const bool pre = !g_pastBoundary;
+    const bool bb = g_onBackbuffer && g_armed.load(std::memory_order_relaxed);
+    Decision d = classify_inner(ctx, count, indexed);
+    if (!bb) return d;
+    ++g_lr.draws;
+    if (d.skip) { ++g_lr.skip; return d; }
+    if (d.redirectRtv || g_ourBound) { ++g_lr.sheet; return d; } // our capture / recording target is bound
+    const bool stillPre = pre && !g_pastBoundary;
+    const bool boundary = pre && g_pastBoundary && !g_provisional; // the scene blit itself
+    if (boundary) return d;
+    if (stillPre) ++g_lr.preEye; else ++g_lr.eye;
+    if (g_lr.items < 8 && g_lr.listN < 170) {
+        unsigned w = 0, h = 0;
+        srv0_size(ctx, &w, &h);
+        g_lr.listN += snprintf(g_lr.list + g_lr.listN, sizeof(g_lr.list) - g_lr.listN, " %s%s%u/%ux%u",
+                               stillPre ? "pre:" : "eye:", indexed ? "i" : "v", count, w, h);
+        ++g_lr.items;
+    }
+    return d;
+}
+void srv0_size(ID3D11DeviceContext* ctx, unsigned* w, unsigned* h) {
+    D3D11_TEXTURE2D_DESC td{};
+    if (blit_source(ctx, &td)) { *w = td.Width; *h = td.Height; }
+}
+
+Decision classify_inner(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
     Decision d{};
     if (!g_armed.load(std::memory_order_relaxed)) return d;
     if (!g_onBackbuffer) return d;
+    const bool blitShape = (indexed && count == 6) ||
+                           (!indexed && count == 3 && g_triangleBoundary.load(std::memory_order_relaxed));
+    bool keptAsUi = false;
+    const bool mapSafe = g_mapSafe.load(std::memory_order_relaxed) && g_menuScreen.load(std::memory_order_relaxed) &&
+                         g_redirect.load(std::memory_order_relaxed);
+    if (mapSafe && g_pastBoundary && g_provisional && blitShape && is_boundary_blit(ctx)) {
+        trace_ev('X');
+        if (g_cMapSafeSkip.fetch_add(1, std::memory_order_relaxed) < 3)
+            BVR_LOG("gfx_hud: MAPSAFE full-screen blit after the map's UI had started - dropped (eye stays black)");
+        d.skip = true;
+        return d;
+    }
+    if (g_pastBoundary && g_provisional && blitShape && is_boundary_blit(ctx) && g_earlyStrict.load(std::memory_order_relaxed)) {
+        // EARLYSTRICT: only the scene's own source picture undoes the provisional run (none learnt yet = old rule).
+        D3D11_TEXTURE2D_DESC td{};
+        IUnknown* id = blit_source(ctx, &td);
+        const bool foreign = g_sceneSrc[0] && !scene_source_known(id);
+        const ULONGLONG nowE = GetTickCount64();
+        const bool mapType = (g_secondBlitMs && nowE - g_secondBlitMs < 1000) || nowE < g_mapUntilMs ||
+                             g_menuScreen.load(std::memory_order_relaxed); // MS3
+        if (foreign || mapType) {
+            keptAsUi = true;
+            trace_ev('K');
+            if (g_cEarlyKept.fetch_add(1, std::memory_order_relaxed) < 8)
+                BVR_LOG("gfx_hud: EARLYSTRICT full-screen picture %p %ux%u fmt %d kept on the menu sheet (%s)",
+                        static_cast<void*>(id), td.Width, td.Height, int(td.Format),
+                        foreign ? "not the scene's picture" : nowE < g_mapUntilMs ? "map screen up" : "second scene blit seen recently = map grid");
+        }
+    }
+    if (g_pastBoundary && !g_provisional && blitShape && is_boundary_blit(ctx) &&
+        scene_source_known(blit_source(ctx, nullptr))) {
+        // EARLYSTRICT v2: a second blit of the scene picture after this pass's boundary (the map grid). It stays UI.
+        g_secondBlitMs = GetTickCount64();
+        trace_ev('S');
+        if (g_cSecondBlit.fetch_add(1, std::memory_order_relaxed) < 3)
+            BVR_LOG("gfx_hud: second blit of the scene picture after the boundary (map-type screen) - kept as UI");
+    }
+    if (!keptAsUi && g_pastBoundary && g_provisional && blitShape && is_boundary_blit(ctx)) {
+        // EARLYUI undone: the scene blit came after all - drop the provisional pieces, the blit goes to the eye.
+        g_provisional = false;
+        trace_ev('U');
+        g_cEarlyUndone.fetch_add(1, std::memory_order_relaxed);
+        g_cBoundaries.fetch_add(1, std::memory_order_relaxed);
+        if (g_capRtv) { const float clear[4] = {}; ctx->ClearRenderTargetView(g_capRtv, clear); }
+        if (g_ourBound) { g_ourBound = false; d.restoreRtv = g_gameRtv; d.restoreDsv = g_curDsv; }
+        return d;
+    }
     if (!g_pastBoundary) {
-        if (((indexed && count == 6) ||
-             (!indexed && count == 3 && g_triangleBoundary.load(std::memory_order_relaxed))) &&
-            is_boundary_blit(ctx)) {
+        if (blitShape && is_boundary_blit(ctx)) {
             g_pastBoundary = true;
             g_cBoundaries.fetch_add(1, std::memory_order_relaxed);
+            learn_scene_source(ctx); // EARLYSTRICT
+            trace_ev('B');
+            // MAPBLIT (Origins 2026-10-11, MAPTRACE 17:37: 176 leaking eye pictures in 20 s, ALL one eye, every HUD
+            // piece on the sheet - the only eye draw was this blit, and its picture held the map's own art (grid +
+            // glow, floor plan) left in the shared scene picture by the other eye's pass). On the map there is no 3D
+            // world: the eye is cleared to black and the blit goes on the sheet, like the map's later blits do.
+            if (g_mapBlit.load(std::memory_order_relaxed) &&
+                (g_mapBlitSrc.load(std::memory_order_relaxed) == 1 ? g_menuScreen.load(std::memory_order_relaxed)
+                                                                   : GetTickCount64() < g_mapUntilMs) &&
+                g_redirect.load(std::memory_order_relaxed) && g_gameRtv && ensure_capture(ctx)) {
+                trace_ev('M');
+                g_cMapBlit.fetch_add(1, std::memory_order_relaxed);
+                const float black[4] = {0, 0, 0, 1};
+                ctx->ClearRenderTargetView(g_gameRtv, black);
+                if (!g_clearedThisFrame) {
+                    g_clearedThisFrame = true;
+                    const float clear[4] = {0, 0, 0, 0};
+                    ctx->ClearRenderTargetView(g_capRtv, clear);
+                }
+                g_cRedirected.fetch_add(1, std::memory_order_relaxed);
+                g_ourBound = true;
+                d.redirectRtv = g_capRtv;
+                d.redirectDsv = hud_dsv(ctx);
+                d.blend = fixed_blend(ctx);
+            }
+            return d;
+        }
+        if ((g_earlyUi.load(std::memory_order_relaxed) && g_redirect.load(std::memory_order_relaxed) &&
+             g_eyePassOpen.load(std::memory_order_relaxed)) || mapSafe) {
+            g_pastBoundary = true; // EARLYUI (eye passes only: redirect is on): fall through - this draw starts the UI run
+            g_provisional = true;
+            trace_ev('P');
+            g_cEarlyUi.fetch_add(1, std::memory_order_relaxed);
+            if (mapSafe && g_gameRtv) { // MAPSAFE: the eye is black on the map, whatever its target held before
+                const float black[4] = {0, 0, 0, 1};
+                ctx->ClearRenderTargetView(g_gameRtv, black);
+                g_cMapSafeStart.fetch_add(1, std::memory_order_relaxed);
+                if (!g_eyePassOpen.load(std::memory_order_relaxed)) g_cMapSafeNoPass.fetch_add(1, std::memory_order_relaxed);
+            }
+            // MAPBLIT2 (MS7, LIVE 23:33: in the map MAPBLIT blanked every boundary pass, yet JJ still saw a head-locked copy
+            // at the edges; EARLYUI "caught" rose ~2.7/s there = passes with NO scene blit, where MAPBLIT never runs and the
+            // eye keeps whatever its target last held). While a screen menu is up, such a pass is blanked as well.
+            if (g_mapBlit.load(std::memory_order_relaxed) && g_mapBlitSrc.load(std::memory_order_relaxed) == 1 &&
+                g_menuScreen.load(std::memory_order_relaxed) && g_gameRtv) {
+                const float black[4] = {0, 0, 0, 1};
+                ctx->ClearRenderTargetView(g_gameRtv, black);
+                g_cMapBlit2.fetch_add(1, std::memory_order_relaxed);
+                trace_ev('m');
+            }
         } else if (g_ourBound) {
             // A stale redirect binding survived into a pre-boundary draw
             // (present rolled while our RT was bound and the game has not
@@ -1226,8 +1567,10 @@ Decision classify(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
             g_ourBound = false;
             d.restoreRtv = g_gameRtv;
             d.restoreDsv = g_curDsv;
+            return d;
+        } else {
+            return d;
         }
-        return d;
     }
     // Post-boundary backbuffer draw = UI-run content.
     g_cHudDraws.fetch_add(1, std::memory_order_relaxed);
@@ -1316,7 +1659,7 @@ Decision classify(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
     // (frame dump 031117: 1008-13455 indices each, every frame, clock stopped = "not gameplay"), which the rule "outside
     // gameplay every untextured piece is a wipe" hid. Wipe squares / rings / bat sprites are small or textured. A
     // big untextured shape = the map screen: no wipe hiding (and no replay over it) while it is up, 1.5 s hold.
-    static ULONGLONG s_mapUntil = 0;
+    ULONGLONG& s_mapUntil = g_mapUntilMs; // shared with EARLYSTRICT
     if (indexed && count >= 2000 && g_mapScreenOn.load(std::memory_order_relaxed) && untextured(ctx)) {
         if (nowMs >= s_mapUntil) {
             BVR_LOG("gfx_hud: map screen (untextured shape of %u indices) - wipe hiding paused while it is up", count);
@@ -1405,6 +1748,9 @@ Decision classify(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
         return d;
     }
     if (keep) {
+        // EYB3: name this route in the tracer - a transition ("cut") piece kept in the eye. C = cut piece, W = the frame
+        // after a wipe frame (wipeRest), G = after a pure-cut frame / big cut scale.
+        trace_ev(wipeRest ? 'W' : (cutType && g_prevPureCut) ? 'G' : 'C');
         if (cutType || wipeRest) g_lastWipeMs.store(nowMs, std::memory_order_relaxed);
         g_cutsKept.fetch_add(1, std::memory_order_relaxed);
         if (g_lineCur >= 0) ++g_lineTex[g_lineCur].eye;
@@ -1462,6 +1808,34 @@ Decision classify(ID3D11DeviceContext* ctx, unsigned count, bool indexed) {
 } // namespace
 
 void set_triangle_boundary(bool on) { g_triangleBoundary.store(on); }
+void note_eye_pass(bool stereoEye, int sign) { g_eyePassOpen.store(stereoEye, std::memory_order_relaxed); g_eyeSign = sign; }
+void start_leak_trace(const wchar_t* dir, int presents) { wcsncpy_s(g_leakDir, dir, _TRUNCATE); g_leakFrames.store(0); g_leakChecked.store(0); g_leakArm.store(presents); }
+uint32_t leak_frames() { return g_leakFrames.load(); }
+bool leak_trace_running() { return g_leakLeft.load() > 0 || g_leakArm.load() > 0; }
+void set_early_ui(bool on) { g_earlyUi.store(on); BVR_LOG("gfx_hud: EARLYUI %s", on ? "on" : "off"); }
+bool early_ui() { return g_earlyUi.load(); }
+void early_ui_stats(uint32_t* early, uint32_t* undone) { *early = g_cEarlyUi.load(); *undone = g_cEarlyUndone.load(); }
+void set_early_strict(bool on) { g_earlyStrict.store(on); BVR_LOG("gfx_hud: EARLYSTRICT %s", on ? "on" : "off"); }
+bool early_strict() { return g_earlyStrict.load(); }
+uint32_t early_kept() { return g_cEarlyKept.load(); }
+uint32_t second_blits() { return g_cSecondBlit.load(); }
+void set_map_blit(bool on) { g_mapBlit.store(on); BVR_LOG("gfx_hud: MAPBLIT %s", on ? "on" : "off"); }
+bool map_blit() { return g_mapBlit.load(); }
+uint32_t map_blits() { return g_cMapBlit.load(); }
+void set_map_safe(bool on) { g_mapSafe.store(on); BVR_LOG("gfx_hud: MAPSAFE %s", on ? "on" : "off"); }
+bool map_safe() { return g_mapSafe.load(); }
+void map_safe_stats(uint32_t* starts, uint32_t* noPass, uint32_t* skips) {
+    *starts = g_cMapSafeStart.load(); *noPass = g_cMapSafeNoPass.load(); *skips = g_cMapSafeSkip.load();
+}
+void set_menu_screen(bool on) {
+    if (g_menuScreen.exchange(on) != on) BVR_LOG("gfx_hud: MAPBLIT menu signal %s", on ? "ON (screen menu open)" : "off");
+}
+void set_map_blit_source(int src) {
+    g_mapBlitSrc.store(src ? 1 : 0);
+    BVR_LOG("gfx_hud: MAPBLIT source %s", src ? "the game's menu signal" : "the old map-shape detector");
+}
+int map_blit_source() { return g_mapBlitSrc.load(); }
+uint32_t map_blits_provisional() { return g_cMapBlit2.load(); }
 void set_draw_override(DrawOverrideFn draw, DrawRestoreFn restore, FrameEndFn end, ClearOverrideFn clear) {
     g_drawOverride = draw; g_drawRestore = restore; g_frameEnd = end; g_clearOverride = clear;
 }
@@ -1482,6 +1856,7 @@ ID3D11RenderTargetView* ui_target(ID3D11DeviceContext* ctx, unsigned* w, unsigne
     return g_capRtv;
 }
 ID3D11DepthStencilView* game_dsv() { return g_curDsv; }
+ID3D11Texture2D* hud_sheet_texture() { return g_capTex; } // EYEBURST: read only, no clear
 float scene_clear_depth() { return g_sceneClearDepth; }
 ID3D11Resource* scene_depth() { return g_sceneDepth; }
 const char* hud_zone_name(int i) { return i >= 0 && i < kHudZones ? g_zones[i].name : ""; }
@@ -1503,7 +1878,111 @@ void set_cuts_to_eye(bool on) { g_cutsToEye.store(on, std::memory_order_relaxed)
 // one, over the whole view; store recorded frames.
 std::atomic<BeforeCaptureHook> g_beforeCaptureHook{nullptr};
 void set_before_capture_hook(BeforeCaptureHook h) { g_beforeCaptureHook.store(h); }
+// MAPHOLD (2026-10-13, EYB3 traces maptrace_185451 / 185510 / 185525, DLSS on): every map flash is ONE present whose map
+// pieces never reached the sheet - a LEFT pass with "draws 38 sheet 37" (normal 76-78: the ~40 map pieces went into the
+// game's scene picture before the scene blit, which then carried them full-view into the eye) or an untagged pass
+// ("sign 0 redirect 0 ... eye 77"). On the map the eyes are black and the whole map is on the sheet in every other pass.
+// While the game's own signal says a map-type screen is open (MENUSTATE BackScreen / Map): a pass whose sheet got far fewer
+// pieces than the last full one (< 60 %), or no redirect at all, is replaced before the eye capture - the eye picture
+// cleared black and the sheet restored from the last full pass (at most 4 passes in a row, so a real change of screen,
+// e.g. another tab, goes through after ~4 frames). Everything else unchanged. `bo maphold on|off`, default on.
+std::atomic<bool> g_mapHold{true};
+std::atomic<uint32_t> g_cMapHold{0}, g_cMapHoldUntagged{0};
+namespace {
+ID3D11Texture2D* g_heldSheet = nullptr;
+ID3D11Texture2D* g_heldSheetOf = nullptr; // the capture texture the held copy was made for
+bool g_heldValid = false;
+unsigned g_mapFull = 0;
+ULONGLONG g_mapSince = 0;
+int g_holdRun = 0;
+
+void map_hold(ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
+    const bool map = g_mapHold.load(std::memory_order_relaxed) && g_menuScreen.load(std::memory_order_relaxed) &&
+                     g_armed.load(std::memory_order_relaxed);
+    const ULONGLONG now = GetTickCount64();
+    if (!map || !ctx || !sc || !g_capTex) {
+        if (!map) { g_mapSince = 0; g_mapFull = 0; g_heldValid = false; g_holdRun = 0; }
+        return;
+    }
+    if (!g_mapSince) g_mapSince = now;
+    if (g_heldSheetOf != g_capTex) { // first use, or the capture texture was rebuilt
+        if (g_heldSheet) { g_heldSheet->Release(); g_heldSheet = nullptr; }
+        g_heldValid = false;
+        D3D11_TEXTURE2D_DESC d{};
+        g_capTex->GetDesc(&d);
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        if (dev) { dev->CreateTexture2D(&d, nullptr, &g_heldSheet); dev->Release(); }
+        g_heldSheetOf = g_heldSheet ? g_capTex : nullptr;
+        if (!g_heldSheet) return;
+    }
+    const unsigned n = g_frameHud;
+    const bool red = g_redirect.load(std::memory_order_relaxed);
+    const bool settled = now - g_mapSince > 500;
+    // MAPHOLD2 (JJ 19:03: "fine for about 15 to 20 seconds and then the map flicker outside the map returned"; trace
+    // maptrace_190324: glitch passes carry 37-59 of 75-78 pieces; the 60 % rule let the 50-59 ones through, and each of
+    // those became the new reference, so the 38-piece ones stopped counting as short). The reference is the FULLEST recent
+    // pass, never lowered by a single short one; any pass under 90 % of it is replaced. A real change of screen (another
+    // tab) is accepted once 8 passes in a row come in short; 8 passes in a row without the menu layer turn the hold off.
+    const bool shortPass = settled && g_heldValid && g_mapFull >= 30 && (!red || n * 10 < g_mapFull * 9);
+    // MAPHOLD3 (JJ 21:4x: "occasional full field of view blackout for one frame"; trace maptrace_214005: runs of 20-24 passes
+    // with ONE sheet piece - the game's own quick fade, at the opening and twice more ~25 s apart - held for 8 passes, then
+    // the empty sheet went through for ~15 = black view). A near-empty pass (< 15 % of the reference) is held up to ~0.5 s
+    // (90 passes); a real change of screen still goes through after 8.
+    const int holdLimit = (red && n * 100 < g_mapFull * 15) ? 90 : 8;
+    if (shortPass && g_holdRun >= holdLimit) {
+        g_holdRun = 0;
+        if (red && n >= 30) {
+            BVR_LOG("gfx_hud: MAPHOLD screen changed (%u map pieces, was %u) - new reference", n, g_mapFull);
+            ctx->CopyResource(g_heldSheet, g_capTex);
+            g_mapFull = n;
+        } else {
+            BVR_LOG("gfx_hud: MAPHOLD menu layer off for 8 passes - hold stopped until full passes return");
+            g_heldValid = false;
+            g_mapFull = 0;
+        }
+        return;
+    }
+    const bool glitch = shortPass;
+    if (glitch) {
+        ID3D11Texture2D* bb = nullptr;
+        if (SUCCEEDED(sc->GetBuffer(0, IID_PPV_ARGS(&bb))) && bb) {
+            ID3D11Device* dev = nullptr;
+            ctx->GetDevice(&dev);
+            ID3D11RenderTargetView* rtv = nullptr;
+            if (dev && SUCCEEDED(dev->CreateRenderTargetView(bb, nullptr, &rtv)) && rtv) {
+                const float black[4] = {0, 0, 0, 1};
+                ctx->ClearRenderTargetView(rtv, black);
+                rtv->Release();
+            }
+            if (dev) dev->Release();
+            bb->Release();
+        }
+        ctx->CopyResource(g_capTex, g_heldSheet);
+        ++g_holdRun;
+        if (!red) g_cMapHoldUntagged.fetch_add(1, std::memory_order_relaxed);
+        if (g_cMapHold.fetch_add(1, std::memory_order_relaxed) < 6)
+            BVR_LOG("gfx_hud: MAPHOLD pass with %u of %u map pieces%s - eye black, last full map sheet shown", n, g_mapFull,
+                    red ? "" : " (no menu layer: untagged pass)");
+        return;
+    }
+    g_holdRun = 0;
+    if (red && n >= 30) {
+        ctx->CopyResource(g_heldSheet, g_capTex);
+        g_heldValid = true;
+        if (n > g_mapFull) g_mapFull = n; // only ever raised here (MAPHOLD2); lowered by the 8-pass screen change above
+    }
+}
+} // namespace
+
+bool menu_screen_on() { return g_menuScreen.load(std::memory_order_relaxed); }
+void set_map_hold(bool on) { g_mapHold.store(on); BVR_LOG("gfx_hud: MAPHOLD %s", on ? "on" : "off"); }
+bool map_hold_on() { return g_mapHold.load(); }
+void map_hold_stats(uint32_t* holds, uint32_t* untagged) { *holds = g_cMapHold.load(); *untagged = g_cMapHoldUntagged.load(); }
+
 void before_eye_capture(ID3D11DeviceContext* ctx, IDXGISwapChain* sc) {
+    if (g_leakLeft.load(std::memory_order_relaxed) > 0 && ctx && sc) leak_tick(ctx, sc); // LEAKTRACE
+    map_hold(ctx, sc); // MAPHOLD (after the tracer, so its leak check still sees the raw pass)
     if (BeforeCaptureHook h = g_beforeCaptureHook.load(std::memory_order_relaxed)) h(ctx, sc); // HD LOGO
     const ULONGLONG now = GetTickCount64();
     {   // WIPESEQ test (JJ 23:25: "still briefly showing a smaller box when the bats first appear" - shorter than the
@@ -2110,9 +2589,12 @@ void on_present(ID3D11DeviceContext* ctx, IDXGISwapChain* swapchain) {
     g_cLastFrameHud.store(g_frameHud, std::memory_order_relaxed);
     g_frameHud = 0;
     g_pastBoundary = false;
+    g_provisional = false; // EARLYUI
+    g_eyePassOpen.store(false, std::memory_order_relaxed);
     g_clearedThisFrame = false;
     g_hudDsvCleared = false; // HUDDSV
     paste_frame_end(); // GLOWZONE
+    leak_frame_end(); // LEAKTRACE (after the present's line is complete)
     // Refresh the backbuffer identity latch (weak - no ref held across
     // frames; a resize simply re-latches).
     g_bbUnk = nullptr;

@@ -11,10 +11,10 @@ add_subdirectory(third_party)
 file(GLOB_RECURSE CORE_SOURCES CONFIGURE_DEPENDS src/core/*.cpp)
 add_library(batman_origins SHARED ${CORE_SOURCES}
  src/hash.cpp tests/hud_boundary_selftest.cpp src/game/adapter_registry.cpp src/game/origins/adapter.cpp
- src/game/origins/scene.cpp src/game/origins/window.cpp src/game/origins/startup.cpp src/game/origins/transitions.cpp src/game/origins/wipe.cpp src/game/origins/afw.cpp src/game/origins/dlss_bridge.cpp src/game/origins/reflect.cpp)
+ src/game/origins/scene.cpp src/game/origins/window.cpp src/game/origins/startup.cpp src/game/origins/transitions.cpp src/game/origins/wipe.cpp src/game/origins/afw.cpp src/game/origins/dlss_bridge.cpp src/game/origins/reflect.cpp src/game/origins/menu_state.cpp)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
 file(WRITE "${CMAKE_BINARY_DIR}/generated/bvr_version.h"
- "#pragma once\n#define BVR_VERSION \"${PROJECT_VERSION}\"\n#define BVR_BUILD_ID \"Origins-development-O1H\"\n")
+ "#pragma once\n#define BVR_VERSION \"${PROJECT_VERSION}\"\n#define BVR_BUILD_ID \"Origins-release-0.1.0\"\n")
 target_include_directories(batman_origins PRIVATE src "${CMAKE_BINARY_DIR}/generated")
 target_link_libraries(batman_origins PRIVATE minhook imgui openxr_loader
  d3d11 dxgi d3dcompiler dbghelp windowscodecs ole32 bcrypt)
