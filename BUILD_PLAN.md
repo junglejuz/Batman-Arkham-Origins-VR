@@ -1171,3 +1171,13 @@ session runs, line 158); memory panel-labels-plain-no-bad-switches; VR_ESSENTIAL
   dist/BatmanOriginsVR-ArkhamOrigins.zip. Installer: first-install backup of GFXSettings xml + BmEngine.ini, DoF / motion
   blur / V-sync off, JJ's settings.ini + bat-wipe.bin into %LOCALAPPDATA%\Batman_Origins (first install only), shortcuts.
   Uninstaller: removes every mod file, puts both settings files back from that backup, deletes the data folder + shortcuts.
+### RELEASE 0.1.0 RESULTS (2026-10-14)
+- STATIC: Release built clean, CTests 3/3. batman_origins.dll SHA-256 516E120DD7D057A8... Practice install (scratchpad: fake
+  game + JJ's pre-mod baseline files, foreign xinput1_3.dll): install x2, uninstall from the game folder -> BmEngine.ini and
+  GFX xml byte-exact, foreign proxy back, data + backup folders gone; all four .ps1 parse clean; manifest 13 files, 0 mismatches.
+- INSTALLED on JJ's game with the package installer (backup seeded from baselines/first-install = his originals; his
+  settings.ini kept; shortcuts on the desktop + Start menu). Backup of the previous install: re/backups/before-release.
+- RELEASED: commit 97b9aba pushed; GitHub release v0.1.0 with dist/BatmanOriginsVR-ArkhamOrigins.zip (62.7 MB, sha256
+  d85421b7ba87db1d..., downloaded back and matched); repo description updated.
+- HEADSET pending: the new panel and the removed recorders have not been run in the game yet. JJ: open the VR menu, go
+  through each drawer, change a HUD slider, restart, check it was kept.
