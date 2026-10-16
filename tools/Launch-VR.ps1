@@ -35,7 +35,7 @@ $docs=[Environment]::GetFolderPath('MyDocuments')
 $gfx=Join-Path $docs 'WB Games/Batman Arkham Origins/GFXSettings.BatmanArkhamOrigins.xml'
 $engine=Join-Path $gameRoot 'SinglePlayer/BMGame/Config/BmEngine.ini'
 Disable-OriginsDepthOfField $gfx $engine $dataDir
-if($SteamVR) {
+function Find-SteamVR32 {
     $steam=(Get-ItemProperty 'HKCU:/SOFTWARE/Valve/Steam' -ErrorAction SilentlyContinue).SteamPath
     $candidates=@()
     # City SVRACTIVE: first the SteamVR install SteamVR itself treats as active (a player with two SteamVR installs).
@@ -44,10 +44,23 @@ if($SteamVR) {
     $candidates+=Join-Path (Split-Path $gameRoot -Parent) 'SteamVR/steamxr_win32.json'
     if($steam) { $candidates+=Join-Path $steam 'steamapps/common/SteamVR/steamxr_win32.json' }
     $json=$candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if($json) { [IO.Path]::GetFullPath($json) }
+}
+if($SteamVR) {
+    $json=Find-SteamVR32
     if(!$json) { throw 'SteamVR steamxr_win32.json was not found. Install/update SteamVR first.' }
-    $env:XR_RUNTIME_JSON=[IO.Path]::GetFullPath($json)
+    $env:XR_RUNTIME_JSON=$json
 }
 $recommendation=& (Join-Path $binaryDir 'bo_xr_config32.exe')
+# Exit 4 = the PC's VR software has no 32-bit runtime (Pimax): use SteamVR's 32-bit one for this launch only.
+if($LASTEXITCODE -eq 4 -and !$SteamVR) {
+    $json=Find-SteamVR32
+    if($json) {
+        Write-Host 'Your VR software has no 32-bit OpenXR runtime - using SteamVR''s for this launch.'
+        $env:XR_RUNTIME_JSON=$json
+        $recommendation=& (Join-Path $binaryDir 'bo_xr_config32.exe')
+    }
+}
 if($LASTEXITCODE -ne 0) { throw 'Headset resolution query failed. Connect the headset to the selected runtime and try again.' }
 $size=$recommendation | ConvertFrom-Json
 $settings=Join-Path $dataDir 'settings.ini'

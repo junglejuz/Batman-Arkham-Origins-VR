@@ -2939,6 +2939,58 @@ void log_active_runtime_expectation() {
         BVR_LOG("xr: 32-bit ActiveRuntime: '%s'", narrow);
 }
 
+// SVRFALLBACK, ported from Batman City (Pimax player log 2026-10-13: "32-bit ActiveRuntime: ...\PiOpenXR_64.json" ->
+// "no 32-bit OpenXR runtime reachable (-51)" -> flat). Pimax registers its 64-bit runtime in the 32-bit slot too, so a
+// 32-bit game finds no runtime at all. SteamVR's own 32-bit OpenXR runtime is then used for this launch only.
+bool g_noRuntimeLoaded = false;
+// SVRACTIVE: the SteamVR install SteamVR itself treats as active is the first "runtime" entry of
+// %LOCALAPPDATA%\openvr\openvrpaths.vrpath.
+bool steamvr_active_dir(wchar_t* out /*MAX_PATH*/) {
+    wchar_t local[MAX_PATH], path[MAX_PATH];
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, local))) return false;
+    swprintf_s(path, L"%s\\openvr\\openvrpaths.vrpath", local);
+    FILE* f = _wfsopen(path, L"rb", _SH_DENYNO);
+    if (!f) return false;
+    char buf[16384] = {};
+    const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    const char* p = strstr(buf, "\"runtime\"");
+    if (p) p = strchr(p, '[');
+    if (p) p = strchr(p, '"');
+    if (!p) return false;
+    ++p;
+    char dir[MAX_PATH * 2] = {};
+    size_t j = 0;
+    for (; *p && *p != '"' && j + 1 < sizeof(dir); ++p) {
+        if (*p == '\\' && p[1]) ++p; // JSON escape: "\\" -> "\"
+        dir[j++] = *p;
+    }
+    if (!j) return false;
+    return MultiByteToWideChar(CP_UTF8, 0, dir, -1, out, MAX_PATH) > 0;
+}
+bool steamvr32_manifest(wchar_t* out /*MAX_PATH*/) {
+    wchar_t active[MAX_PATH] = {};
+    if (steamvr_active_dir(active)) {
+        swprintf_s(out, MAX_PATH, L"%s\\steamxr_win32.json", active);
+        if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) return true;
+    }
+    wchar_t steam[MAX_PATH] = {};
+    DWORD len = sizeof(steam);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath", RRF_RT_REG_SZ, nullptr, steam, &len) ==
+            ERROR_SUCCESS && steam[0]) {
+        for (wchar_t* c = steam; *c; ++c) if (*c == L'/') *c = L'\\';
+        swprintf_s(out, MAX_PATH, L"%s\\steamapps\\common\\SteamVR\\steamxr_win32.json", steam);
+        if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) return true;
+    }
+    wchar_t pf[MAX_PATH] = {};
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_PROGRAM_FILESX86, nullptr, 0, pf))) {
+        swprintf_s(out, MAX_PATH, L"%s\\Steam\\steamapps\\common\\SteamVR\\steamxr_win32.json", pf);
+        if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) return true;
+    }
+    return false;
+}
+
 // One native-or-shim instance attempt: enumerate -> D3D11 check -> create.
 // `label` names the attempt in every log line; `quietExplainer` suppresses
 // the SteamVR wall of text when a shim fallback is about to run anyway.
@@ -2946,6 +2998,7 @@ XrResult try_create_instance(const char* label, bool quietExplainer) {
     uint32_t extCount = 0;
     XrResult r = xrEnumerateInstanceExtensionProperties(nullptr, 0, &extCount, nullptr);
     if (XR_FAILED(r)) {
+        g_noRuntimeLoaded = true; // SVRFALLBACK: no 32-bit runtime library at all (not "headset off")
         BVR_LOG("xr: [%s] no 32-bit OpenXR runtime reachable (%d)", label,
                 static_cast<int>(r));
         return r;
@@ -2991,7 +3044,32 @@ XrResult try_create_instance(const char* label, bool quietExplainer) {
 void init_instance() {
     // Both VDXR and SteamVR use native 32-bit OpenXR. The launcher selects
     // steamxr_win32.json for SteamVR; no OpenVR shim or global runtime change.
+    {   // ELEVATED (Batman City): Windows' OpenXR loader ignores XR_RUNTIME_JSON in a "Run as administrator" process.
+        wchar_t rj[MAX_PATH] = {};
+        const DWORD n = GetEnvironmentVariableW(L"XR_RUNTIME_JSON", rj, MAX_PATH);
+        char rjUtf8[MAX_PATH * 3] = {};
+        if (n && n < MAX_PATH) WideCharToMultiByte(CP_UTF8, 0, rj, -1, rjUtf8, sizeof(rjUtf8), nullptr, nullptr);
+        const bool elevated = process_is_elevated();
+        BVR_LOG("xr: runtime chosen by the launcher: %s | game running as administrator: %s", n ? rjUtf8 : "none (the PC's own)",
+                elevated ? "YES" : "no");
+        if (n && elevated)
+            BVR_LOG("xr: WARNING - the game runs as administrator, so Windows' OpenXR loader ignores the launcher's runtime "
+                    "choice and uses the PC's registered 32-bit runtime instead.");
+        log_active_runtime_expectation();
+    }
     XrResult r = try_create_instance("native OpenXR", true);
+    wchar_t svr[MAX_PATH];
+    if (XR_FAILED(r) && g_noRuntimeLoaded && steamvr32_manifest(svr)) {
+        char svrUtf8[MAX_PATH * 3] = {};
+        WideCharToMultiByte(CP_UTF8, 0, svr, -1, svrUtf8, sizeof(svrUtf8), nullptr, nullptr);
+        BVR_LOG("xr: the PC's VR software has no 32-bit runtime - trying SteamVR's ('%s')", svrUtf8);
+        SetEnvironmentVariableW(L"XR_RUNTIME_JSON", svr);
+        r = try_create_instance("steamvr 32-bit", true);
+        if (XR_FAILED(r)) {
+            SetEnvironmentVariableW(L"XR_RUNTIME_JSON", nullptr);
+            BVR_LOG("xr: SteamVR's 32-bit runtime failed too (%s) - is SteamVR installed and the headset on?", res_str(r));
+        }
+    }
     if (XR_FAILED(r)) {
         BVR_LOG("xr: selected 32-bit OpenXR runtime unavailable; VR disabled, game runs flat");
         return;

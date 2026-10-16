@@ -21,3 +21,6 @@ assets/bat-wipe.bin
 *.log
 *.bmp
 *.upk
+
+# Discord thumbnails (WB cover art) - local only, like City
+images/discord/

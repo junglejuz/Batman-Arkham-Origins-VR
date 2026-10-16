@@ -1181,3 +1181,19 @@ session runs, line 158); memory panel-labels-plain-no-bad-switches; VR_ESSENTIAL
   d85421b7ba87db1d..., downloaded back and matched); repo description updated.
 - HEADSET pending: the new panel and the removed recorders have not been run in the game yet. JJ: open the VR menu, go
   through each drawer, change a HUD slider, restart, check it was kept.
+
+## RELEASE 0.1.1 - Pimax fixes (PIMAX, 2026-10-17; JJ: "fix all the mods so they work on Pimax correctly, then deploy")
+
+Looked up: Asylum Pimax player log + batman_asylum BUILD_PLAN "RELEASE 0.1.1"; City BATMAN_CITY_PLAN SVRFALLBACK /
+SVRACTIVE / ELEVATED. Origins' DLSS helper already never blocks (dlss_bridge on_eye returns until helperReady), so the
+Asylum first-frame stall does not apply here. Origins had NO 32-bit fallback: on a Pimax PC (64-bit runtime registered
+for 32-bit apps) bo_xr_config32 failed and Launch-VR.ps1 refused to start the game.
+
+Fixes (SOURCE, built, offline): SVRFALLBACK + ELEVATED log ported into core openxr_runtime.cpp init_instance;
+bo_xr_config32 exits 4 when no 32-bit runtime can be loaded, Launch-VR.ps1 then uses SteamVR's 32-bit runtime for the
+launch (Find-SteamVR32, active install first). README: one Pimax troubleshooting row.
+
+### RELEASE 0.1.1 RESULTS (2026-10-17)
+- OFFLINE: bo_xr_config32 with VD's 64-bit manifest forced -> exit 4; launcher parses. Package changed vs 0.1.0 =
+  batman_origins.dll, bo_xr_config32.exe, Launch-VR.ps1, version.txt, README; settings = the 0.1.0 zip's settings.ini.
+- HEADSET pending (JJ regression check on VD; Pimax players).

@@ -68,6 +68,7 @@ starting the game from Steam still plays the normal flat game.
 | Nothing in the headset, the game plays on the monitor | Start your PC VR software before the game, make it the active OpenXR runtime, and start the game from the Batman Origins VR shortcut. |
 | A window says the headset could not be asked for its picture size | Connect the headset to your PC VR software first, then start the shortcut again. |
 | The installer stops: "the game has not made its settings yet" | Start the game once from Steam, wait for the main menu, quit, run the installer again. |
+| Pimax (or other VR software with no 32-bit OpenXR runtime): nothing in the headset | The shortcut then uses SteamVR's 32-bit runtime by itself: install SteamVR. Do not run Steam or the game as administrator. |
 | Low frame rate | VR menu: lower the picture size (VR resolution), or turn on DLSS or AFW. |
 | The world feels too big or too small | VR menu: world scale. |
 

@@ -6,6 +6,10 @@ int main() {
     strcpy_s(info.applicationInfo.applicationName,"Origins VR resolution");
     info.applicationInfo.apiVersion=XR_API_VERSION_1_0;
     XrInstance instance=XR_NULL_HANDLE;
+    // Exit 4 = no 32-bit OpenXR runtime can be loaded at all (Pimax registers its 64-bit runtime for 32-bit apps too):
+    // the launcher then retries with SteamVR's 32-bit runtime. A connected-but-idle headset still fails later (1 or 2).
+    uint32_t extensions=0;
+    if(XR_FAILED(xrEnumerateInstanceExtensionProperties(nullptr,0,&extensions,nullptr))) { fprintf(stderr,"No 32-bit OpenXR runtime\n"); return 4; }
     XrResult result=xrCreateInstance(&info,&instance);
     if(XR_FAILED(result)) { fprintf(stderr,"OpenXR create instance failed %d\n",result); return 1; }
     XrSystemGetInfo request{XR_TYPE_SYSTEM_GET_INFO}; request.formFactor=XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
