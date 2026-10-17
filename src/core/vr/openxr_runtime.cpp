@@ -5082,8 +5082,9 @@ void on_present_end(IDXGISwapChain* swapchain) {
             q.subImage.swapchain=g_transitionSwapchain;
             q.subImage.imageRect={{0,0},{int32_t(g_transitionW),int32_t(g_transitionH)}};
             q.size={width,width*aspect};
-            // VDXR's head-centre quad convention; SteamVR uses physical eyes.
-            if(!runtime_is_steamvr()) q.pose.position.x+=e ? -ipdHalf:ipdHalf;
+            // VDXR's head-centre quad convention ONLY. SteamVR and Pimax (and spec runtimes) place a quad from each
+            // physical eye already; shifting there doubled the menu / HUD backdrop (Pimax player, OpenXR only, 2026-10-17).
+            if(strstr(g_runtimeName,"VirtualDesktop")) q.pose.position.x+=e ? -ipdHalf:ipdHalf;
             layers[layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q);
         }
         transitionAppended=true;

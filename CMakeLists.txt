@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(BatmanOriginsVR VERSION 0.1.1 LANGUAGES C CXX)
+project(BatmanOriginsVR VERSION 0.1.2 LANGUAGES C CXX)
 if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
   message(FATAL_ERROR "Origins probe requires MSVC Win32: -G \"Visual Studio 17 2022\" -A Win32")
 endif()
@@ -14,7 +14,7 @@ add_library(batman_origins SHARED ${CORE_SOURCES}
  src/game/origins/scene.cpp src/game/origins/window.cpp src/game/origins/startup.cpp src/game/origins/transitions.cpp src/game/origins/wipe.cpp src/game/origins/afw.cpp src/game/origins/dlss_bridge.cpp src/game/origins/reflect.cpp src/game/origins/menu_state.cpp)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
 file(WRITE "${CMAKE_BINARY_DIR}/generated/bvr_version.h"
- "#pragma once\n#define BVR_VERSION \"${PROJECT_VERSION}\"\n#define BVR_BUILD_ID \"Origins-release-0.1.1\"\n")
+ "#pragma once\n#define BVR_VERSION \"${PROJECT_VERSION}\"\n#define BVR_BUILD_ID \"Origins-release-0.1.2\"\n")
 target_include_directories(batman_origins PRIVATE src "${CMAKE_BINARY_DIR}/generated")
 target_link_libraries(batman_origins PRIVATE minhook imgui openxr_loader
  d3d11 dxgi d3dcompiler dbghelp windowscodecs ole32 bcrypt)
