@@ -9,7 +9,7 @@ import argparse, hashlib, os, re, shutil, sys, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-VERSION = '0.1.2'
+VERSION = '0.1.3'
 ap = argparse.ArgumentParser()
 ap.add_argument('--settings', default=os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Batman_Origins', 'settings.ini'))
 a = ap.parse_args()
@@ -47,6 +47,10 @@ dl = os.path.join('files', 'BatmanOriginsDLSS')
 put(os.path.join(ROOT, 'build64', 'Release', 'bo_dlss64.exe'), os.path.join(dl, 'bo_dlss64.exe'))
 put(os.path.join(ROOT, '..', 'akvr_native', 'third_party', 'ngx', 'bin', 'nvngx_dlss.dll'), os.path.join(dl, 'nvngx_dlss.dll'))
 put(a.settings, os.path.join('files', 'settings.ini'))
+# FIRSTPERSON: new players start in third person whatever JJ last used (City SHIP_OVERRIDES first_person=0).
+sp = os.path.join(stage, 'files', 'settings.ini')
+st = open(sp, encoding='latin-1').read()
+open(sp, 'w', encoding='latin-1', newline='').write(re.sub(r'(?ims)(^\[first_person\][^\[]*?^on=)1', r'\g<1>0', st))
 open(os.path.join(stage, 'files', 'version.txt'), 'w', newline='\n').write(VERSION + '\n')
 for f in ('README.md', 'LICENSE-bioshock-vr.txt', 'LICENSE-luma-framework.md', 'THIRD_PARTY_NOTICES.md'):
     put(os.path.join(ROOT, f), f)

@@ -1,3 +1,60 @@
+## RELEASE 0.1.3 (2026-10-20, JJ: "deploy both of those to github")
+
+First person (FIRSTPERSON, below) + launcher access-denied fix (WRITEDENIED, below). Version 0.1.3 (CMake, package).
+4/4 offline checks pass (new graphics_profile_write_denied); package zip sha256
+cc13abb25cbd3d17a4140b624892b8e396da4a0e13af21abd3c60859b5e377fa, installed on JJ's game by the package installer. First
+person HEADSET pending (shipped OFF by default).
+
+## WRITEDENIED - same trap as Asylum's player report (JJ 2026-10-20: "check the origins trap first")
+
+Origins keeps its graphics store in Documents (WB Games\Batman Arkham Origins\GFXSettings.BatmanArkhamOrigins.xml) and
+the launcher wrote it every VR start. If Windows refuses that write (Controlled folder access blocks PowerShell in
+Documents, permissions): the DoF step threw on every start, and a refused resolution write made the restore rewrite the
+unchanged file, fail, keep profile-active.json and stop every later launch / install / uninstall - Asylum's exact bug
+(batman_asylum BUILD_PLAN WRITEDENIED). Fix (SOURCE, tests/graphics_profile_check.ps1 PASS, new ctest):
+1. Graphics-Profile.ps1: Test-OriginsWritable; Restore-OriginsProfile skips files equal to their original, continues
+   past one failure, names each file + its saved original; Disable-OriginsDepthOfField takes no graphics store (engine
+   only) and rolls back only what it wrote.
+2. Launcher: write test before anything changes; unwritable engine file (game folder) stops with instructions; refused
+   Documents store is left as it is with a warning (command line still sets window + size).
+3. Installer: journal replay skips unchanged files and only warns; refused store -> engine-only setup + message.
+   Uninstaller: replay skips unchanged files, stops before removing anything on a real failure; the final copy of the
+   original store stops with instructions before the backup folder is deleted.
+
+## FIRSTPERSON - City's first-person mode (JJ 2026-10-20: "add the same first person mode we have for the other arkham games ... add it to origins too")
+
+Looked up: memory batman-city-first-person + ak-first-person; batman_city BATMAN_CITY_PLAN FIRSTPERSON / HEADCAM / FPGATE and scene.cpp fp_update / fp_head_follow / fp_apply (the donor); memory origins-port-city-fixes-by-code-shape (method); Origins never got first person (ORIGINS_PLAN P7 planned only). Playbook/framework: City already cites CAM-001/CAM-013, FAIL-CAM-020, guide 13 (REFramework FirstPerson) - nothing new needed for a straight port.
+
+What it is (City's, unchanged): panel FIRST PERSON (top) or both sticks clicked twice quickly; camera at Batman's eye point
+(Location + EyeHeight) following his Bip01_Head bone (smoothed 0.08 s, capped 140 UU), 25 cm in front of his face (head
+not hidden), look direction stays the game camera's. Gate (FPGATE): an open menu (MENUSTATE: pause, map, upgrades), or the game camera more than 12 m from him (main
+menu stand-in pawn) - the setting stays on. Saved in settings.ini [first_person] on / forward_cm / up_cm / head / head_smooth; the package ships it OFF. Commands `bo fp on|off|fwd N|up N|head 0|1|smooth S|status`.
+
+STATIC RE 2026-10-20 (scratch scanner on the retail exe, City's functions found by identical code shape):
+| | City | Origins |
+|---|---|---|
+| GetPawnViewLocation | 0x7A6970 | 0x7ACD50: Location +0x48, EyeHeight +0x2C0 |
+| GetViewRotation | 0x7BA650 | 0x7B4A80: Controller +0x1E4 |
+| Pawn.Mesh | +0x36C | +0x384 (game's own head read 0xF44E3B) |
+| Head bone | GetBoneLocation 0x850EE0, FName 0x620 | FName ctor 0x485180 (L"Bip01_Head",1,1; ret 0xC) -> GetBoneLocation 0x84E590 (same signature, ret 0x10, SkeletalMesh +0x1C4) |
+Every Pawn field is City's + 0x18 except Location.
+Player -> controller (City +0x30) and controller -> pawn are found LIVE by the pawn's back-pointer (log line "first person:
+player +0x.. = controller .., its +0x.. = Batman"). Hook: scene.cpp calc_detour (first eye pass) computes the eye point; ctor_detour moves `base` before the eye deltas (DLSS / AFW follow it).
+
+Built + offline checks pass + installed via the player package (local build, not released). HEADSET pending.
+
+### TEST PLAN FIRSTPERSON (JJ drives, one launch)
+| # | do | look for | log |
+|---|---|---|---|
+| 1 | VR shortcut, main menu | normal menu 3D (first person must NOT move the menu camera even if on) | "first person paused: ..." |
+| 2 | gameplay, both sticks clicked twice quickly | view jumps to Batman's eyes, cowl not in view | "player +0x.. = controller", "head: name Bip01_Head", "eye point" |
+| 3 | walk, run, jump/glide, a fight/takedown | camera stays at his head, no shaking, not inside his head | head frames rising, "steady eye point" count low |
+| 4 | pause menu / map, then back | menu as before, first person back after | "paused: menu" / "active again" |
+| 5 | panel: untick "camera follows his head" | steadier but head comes through camera on glides | - |
+| 6 | anything wrong: F2 | capture | - |
+Follow-ups: pawn never found -> widen the live scan (player range 0x20-0x80, controller 0x100-0x700); head misses -> log names the
+reason (no mesh / no skeleton / no bone / cap).
+
 # Origins playable development build — O1B
 
 ## TEST PLAN O1C — opening-title skip and HUD fusion (before build/live changes)

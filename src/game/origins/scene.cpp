@@ -3,6 +3,7 @@
 #include "scene.h"
 #include "afw.h"
 #include "dlss_bridge.h"
+#include "first_person.h"
 #include "menu_state.h"
 #include "reflect.h"
 #include "core/vr/eye_burst.h"
@@ -298,6 +299,9 @@ void* __fastcall calc_detour(void* self,void* edx,void* family,float* loc,int32_
         if(mapNow!=s_prevMap) { s_prevMap=mapNow; if(mapRec.load()) record_map(mapNow); }
     }
     const bool ours=depth && viewport==viewportNow;
+    // FIRSTPERSON: this pair's eye point, from the first eye's pass (the second eye reuses it). self = the ULocalPlayer.
+    if(ours && eyeSign && (eyeSign<0 || afwFrame))
+        first_person::update(self,menu_state::live() && menu_state::menu_open() ? "menu (pause, map, upgrades)" : nullptr);
     if(ours) ++calcDepth;
     void* out=calcOriginal(self,edx,family,loc,rot,viewport,drawer);
     if(ours) --calcDepth;
@@ -315,6 +319,7 @@ void* __fastcall ctor_detour(void* self,void* edx,A28) {
     }
     foundView=true;
     if(!eyeSign || !poseValid) return ctorOriginal(self,edx,P28(a14,a15));
+    first_person::apply(base.m,worldScale.load()); // FIRSTPERSON: the game camera at his eyes (everything below follows it)
     int e=eyeSign<0 ? 0 : 1;
     M4 view=mul(base,delta(eyes[e]));
     M4 proj=lens(projection,e),unjittered=proj;
@@ -477,6 +482,7 @@ bool install() {
     GetPrivateProfileStringW(L"launch",L"resolution_scale",L"1",text,64,settings);
     resolutionScale.store(float(std::clamp(wcstod(text,nullptr),.6,1.8)));
     settings_load_panel(settings);
+    first_person::install(imageBase,settings);
     const wchar_t* cmd=GetCommandLineW();
     auto* outputX=wcsstr(cmd,L"-BOOutputX="); auto* outputY=wcsstr(cmd,L"-BOOutputY=");
     auto* modeArg=wcsstr(cmd,L"-BODLSS=");
@@ -561,6 +567,7 @@ bool handle_command(const char* args) {
     else if(!strncmp(args,"hudeyes ",8)) { vr::set_hud_eyes(atoi(args+8)); BVR_LOG("[bo] HUD per-eye copies %d",vr::hud_eyes()); }
     else if(!strcmp(args,"recenter")) recentre.store(true);
     else if(!strncmp(args,"afw ",4)) return afw::command(args+4);
+    else if(!strncmp(args,"fp ",3)) return first_person::command(args+3);
     else if(!strncmp(args,"bats ",5)) return transitions::command(args+5);
     else if(!strncmp(args,"reflect ",8)) return reflect::command(args+8);
     else if(!strncmp(args,"dlss ",5)) { bool ok=dlss_bridge::command(args+5); settings_save(); return ok; }
@@ -603,6 +610,7 @@ void draw_ui() {
     if(ImGui::Button(camera.load() ? "Head tracking: ON  (F11)" : "Head tracking: OFF  (F11)")) set_camera(!camera.load());
     ImGui::TextDisabled("controller: left stick / d-pad = move, A = select / change, B = back, both stick clicks = close");
     ImGui::Separator();
+    first_person::draw_ui(); // FIRSTPERSON: at the top, it changes the whole view (City)
 
     ImGui::SetNextItemOpen(true,ImGuiCond_Once);
     if(ImGui::CollapsingHeader("STEREO RENDERING")) {

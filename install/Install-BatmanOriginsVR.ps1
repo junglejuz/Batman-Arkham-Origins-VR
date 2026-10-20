@@ -105,14 +105,22 @@ if (-not $DataDir) { $DataDir = Join-Path $env:LOCALAPPDATA 'Batman_Origins' }
 # A VR launch that was cut short leaves its temporary graphics settings in place: put the player's back first.
 $journal = Join-Path $DataDir 'profile-active.json'
 if (Test-Path -LiteralPath $journal) {
+    # A file already equal to its original is skipped: a Documents file Windows would not let us write (Controlled folder
+    # access, permissions) was never changed, and writing it again here stopped the reinstall (WRITEDENIED).
     $prof = Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json
+    $left = @()
     foreach ($file in $prof.files) {
+        if ((Test-Path -LiteralPath $file.path) -and (Get-FileHash -LiteralPath $file.path).Hash -eq $file.sha256) { continue }
         if ((Test-Path -LiteralPath $file.backup) -and (Get-FileHash -LiteralPath $file.backup).Hash -eq $file.sha256) {
-            [IO.File]::WriteAllBytes($file.path, [IO.File]::ReadAllBytes($file.backup))
+            try { [IO.File]::WriteAllBytes($file.path, [IO.File]::ReadAllBytes($file.backup)) }
+            catch { $left += $file.path; Say "  Windows did not allow $($file.path) to be put back. Your original is saved at $($file.backup)." Yellow }
         }
     }
-    Remove-Item -LiteralPath $journal -Force
-    Say '  Settings from an interrupted VR launch were put back first.' Yellow
+    if ($left.Count) { Say '  The VR launcher will try again and tell you what to do.' Yellow }
+    else {
+        Remove-Item -LiteralPath $journal -Force
+        Say '  Settings from an interrupted VR launch were put back first.' Yellow
+    }
 }
 
 # ---- 2. back up what we change (first install only, so the uninstaller always gets the player's originals) --------
@@ -178,17 +186,29 @@ if (-not (Test-Path (Join-Path $DataDir 'settings.ini'))) {
 # edits them byte-preserving. Its DoF switch also keeps a dated copy in the data folder.
 Step '4. Setting the game up for VR'
 . (Join-Path $Here 'files\OriginsVR\Graphics-Profile.ps1')
-Disable-OriginsDepthOfField $Gfx $Engine $DataDir
-$gt = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($Gfx))
-$gt2 = Set-OriginsOption (Set-OriginsOption $gt 'VSync' 'false') 'MotionBlur' 'false'
-if ($gt2 -cne $gt) { [IO.File]::WriteAllBytes($Gfx, [Text.Encoding]::Unicode.GetBytes($gt2)) }
+# WRITEDENIED: Windows may refuse changes to the Documents graphics store (Controlled folder access): leave it, say so.
+$why = Test-OriginsWritable $Engine
+if ($why) { Fail "Windows does not allow changes to the game's settings file $Engine ($why). To fix it, $OriginsWriteHelp, then run the installer again." }
+$why = Test-OriginsWritable $Gfx
+$GfxVR = $Gfx
+if ($why) {
+    Say "  Windows does not allow changes to $Gfx ($why)." Yellow
+    Say "  It is left as it is: turn depth of field, motion blur and V-sync off in the game's own menu, or $OriginsWriteHelp and run the installer again." Yellow
+    $GfxVR = $null
+}
+Disable-OriginsDepthOfField $GfxVR $Engine $DataDir
+if ($GfxVR) {
+    $gt = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($Gfx))
+    $gt2 = Set-OriginsOption (Set-OriginsOption $gt 'VSync' 'false') 'MotionBlur' 'false'
+    if ($gt2 -cne $gt) { [IO.File]::WriteAllBytes($Gfx, [Text.Encoding]::Unicode.GetBytes($gt2)) }
+}
 $et = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($Engine))
 $et2 = $et
 foreach ($kv in @(@('UseVsync', 'False'), @('MotionBlur', 'False'))) {
     $et2 = [regex]::Replace($et2, '(?mi)^(' + $kv[0] + '=)[^\r\n]*', ('${1}' + $kv[1]))
 }
 if ($et2 -cne $et) { [IO.File]::WriteAllBytes($Engine, [Text.Encoding]::Unicode.GetBytes($et2)) }
-Say '  Depth of field, motion blur and V-sync off.' Green
+if ($GfxVR) { Say '  Depth of field, motion blur and V-sync off.' Green } else { Say '  The game folder''s depth of field, motion blur and V-sync settings are off.' Green }
 
 # ---- 6. shortcuts -----------------------------------------------------------------------------------
 if (-not $NoShortcuts) {

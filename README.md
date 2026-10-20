@@ -23,6 +23,8 @@ behind when the camera swings. Made the same way as [Batman City VR](https://git
 - **HUD on a panel in front of you**, at a depth both eyes agree on.
 - **Menus, the map and loading screens** on screens in the room, with full-view bat transitions.
 - **Puddle reflections drawn for each eye**, so wet streets look right in both eyes.
+- **First person, if you want it**: tick FIRST PERSON in the VR menu, or click both thumbsticks twice quickly. The
+  camera sits at Batman's eyes and follows his head; it switches back by itself in menus, the map and movies, and whenever the game moves its camera away from him.
 - **An in-headset VR menu**: hold both thumbsticks down (or press F10). World scale, HUD size and distance, render
   size, DLSS, and more. Settings are saved.
 
@@ -59,6 +61,7 @@ starting the game from Steam still plays the normal flat game.
 | VR menu | hold both thumbsticks down for half a second, or F10 |
 | Recenter | hold the headset's menu / Meta button, or F12 |
 | Skip the opening logos | any face button, Start or Back |
+| First person on / off | the VR menu's FIRST PERSON, or click both thumbsticks twice quickly |
 | Save a picture of both eyes | the VR menu's capture button, or F2 |
 
 ## If something is wrong
@@ -69,6 +72,7 @@ starting the game from Steam still plays the normal flat game.
 | A window says the headset could not be asked for its picture size | Connect the headset to your PC VR software first, then start the shortcut again. |
 | The installer stops: "the game has not made its settings yet" | Start the game once from Steam, wait for the main menu, quit, run the installer again. |
 | Pimax (or other VR software with no 32-bit OpenXR runtime): nothing in the headset | The shortcut then uses SteamVR's 32-bit runtime by itself: install SteamVR. Do not run Steam or the game as administrator. |
+| The launcher says Windows does not allow changes to a settings file ("Access denied") | Usually Windows Security's "Controlled folder access". Allow PowerShell there (Virus & threat protection > Ransomware protection > Allow an app through Controlled folder access), or untick Read-only on the file it names. If only the graphics file in Documents is refused, it is left as it is and VR starts anyway. |
 | Low frame rate | VR menu: lower the picture size (VR resolution), or turn on DLSS or AFW. |
 | The world feels too big or too small | VR menu: world scale. |
 

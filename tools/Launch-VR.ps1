@@ -19,21 +19,26 @@ $games=@(Get-Process -ErrorAction SilentlyContinue | Where-Object ProcessName -M
 if($games.Count) { throw "Close the running game first: $($games.ProcessName -join ', ')." }
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
 
-function Restore-Profile($profile) {
-    foreach($file in $profile.files) {
-        if((Get-FileHash -LiteralPath $file.backup).Hash -ne $file.sha256) { throw "Profile backup differs: $($file.backup)" }
-        [IO.File]::WriteAllBytes($file.path,[IO.File]::ReadAllBytes($file.backup))
-    }
-}
-# Recover an interrupted launcher before saving a new baseline.
+. (Join-Path $PSScriptRoot 'Graphics-Profile.ps1')
+# Recover an interrupted launcher before saving a new baseline (files still equal to their originals are skipped).
 if(Test-Path -LiteralPath $journal) {
-    Restore-Profile (Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json)
+    Restore-OriginsProfile (Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json)
     Remove-Item -LiteralPath $journal
 }
-. (Join-Path $PSScriptRoot 'Graphics-Profile.ps1')
 $docs=[Environment]::GetFolderPath('MyDocuments')
 $gfx=Join-Path $docs 'WB Games/Batman Arkham Origins/GFXSettings.BatmanArkhamOrigins.xml'
 $engine=Join-Path $gameRoot 'SinglePlayer/BMGame/Config/BmEngine.ini'
+foreach($path in @($gfx,$engine)) { if(!(Test-Path -LiteralPath $path)) { throw "Expected game settings absent: $path" } }
+# WRITEDENIED (Asylum player report 2026-10-20): test write access before changing anything. The game folder's engine
+# file holds the frame cap and must be writable; a Documents graphics store Windows refuses is left as it is (the command
+# line still sets the window and size).
+$why=Test-OriginsWritable $engine
+if($why) { throw "Windows does not allow changes to the game's settings file $engine ($why). To fix it, $OriginsWriteHelp, then start VR again. Nothing was changed." }
+$why=Test-OriginsWritable $gfx
+if($why) {
+    Write-Warning "Windows does not allow changes to $gfx ($why). It is left as it is and VR starts anyway; if the game runs fullscreen, with V-sync or the wrong size, $OriginsWriteHelp."
+    $gfx=$null
+}
 Disable-OriginsDepthOfField $gfx $engine $dataDir
 function Find-SteamVR32 {
     $steam=(Get-ItemProperty 'HKCU:/SOFTWARE/Valve/Steam' -ErrorAction SilentlyContinue).SteamPath
@@ -79,12 +84,8 @@ $rh=[int]([Math]::Ceiling($oh*$ratios[$mode]/2)*2)
 if($rw -lt 512 -or $rh -lt 512 -or $ow -gt 8192 -or $oh -gt 8192) { throw 'Runtime recommendation exceeds supported render bounds.' }
 $backup=Join-Path $dataDir ('profiles/'+(Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
 New-Item -ItemType Directory -Path $backup -Force | Out-Null
-$docs=[Environment]::GetFolderPath('MyDocuments')
-$gfx=Join-Path $docs 'WB Games/Batman Arkham Origins/GFXSettings.BatmanArkhamOrigins.xml'
-$engine=Join-Path $gameRoot 'SinglePlayer/BMGame/Config/BmEngine.ini'
 $files=@()
-foreach($path in @($gfx,$engine)) {
-    if(!(Test-Path -LiteralPath $path)) { throw "Expected game settings absent: $path" }
+foreach($path in @($gfx,$engine) | Where-Object { $_ }) {
     $dest=Join-Path $backup ([IO.Path]::GetFileName($path))
     [IO.File]::WriteAllBytes($dest,[IO.File]::ReadAllBytes($path))
     $files+=@{path=$path;backup=$dest;sha256=(Get-FileHash -LiteralPath $path).Hash}
@@ -93,15 +94,17 @@ $profile=@{files=$files;runtime=$size.runtime;output=@($ow,$oh);render=@($rw,$rh
 $profile | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $journal -Encoding UTF8
 try {
     # Exact replacements preserve UTF-16, BOM state and all unrelated values.
-    $gfxText=[Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($gfx))
-    foreach($option in @(@('Fullscreen','false'),@('ResolutionX',"$rw"),@('ResolutionY',"$rh"),@('VSync','false'))) {
-        $pattern='(<OPTION\s+Name="'+$option[0]+'"[^>]*\bValue=")[^"]*(")'
-        if([regex]::Matches($gfxText,$pattern).Count -ne 1) { throw "Graphics option is ambiguous: $($option[0])" }
-        $replacement=$option[1]
-        $gfxText=[regex]::Replace($gfxText,$pattern,{param($m) $m.Groups[1].Value+$replacement+$m.Groups[2].Value})
+    if($gfx) {
+        $gfxText=[Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($gfx))
+        foreach($option in @(@('Fullscreen','false'),@('ResolutionX',"$rw"),@('ResolutionY',"$rh"),@('VSync','false'))) {
+            $pattern='(<OPTION\s+Name="'+$option[0]+'"[^>]*\bValue=")[^"]*(")'
+            if([regex]::Matches($gfxText,$pattern).Count -ne 1) { throw "Graphics option is ambiguous: $($option[0])" }
+            $replacement=$option[1]
+            $gfxText=[regex]::Replace($gfxText,$pattern,{param($m) $m.Groups[1].Value+$replacement+$m.Groups[2].Value})
+        }
+        if($mode -gt 0) { $gfxText=Set-OriginsOption $gfxText 'AntiAliasing' 'OFF' }
+        [IO.File]::WriteAllBytes($gfx,[Text.Encoding]::Unicode.GetBytes($gfxText))
     }
-    if($mode -gt 0) { $gfxText=Set-OriginsOption $gfxText 'AntiAliasing' 'OFF' }
-    [IO.File]::WriteAllBytes($gfx,[Text.Encoding]::Unicode.GetBytes($gfxText))
     # Let XR pace the application. DLSS supplies AA without another temporal pass.
     $engineText=[Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($engine))
     $engineText=[regex]::Replace($engineText,'(?m)^(bSmoothFrameRate=)[^\r\n]*','$1False')
@@ -121,7 +124,7 @@ try {
     while(Get-Process BatmanOrigins -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 1 }
 } finally {
     if(!(Get-Process BatmanOrigins -ErrorAction SilentlyContinue)) {
-        Restore-Profile $profile
+        Restore-OriginsProfile $profile
         Remove-Item -LiteralPath $journal -ErrorAction SilentlyContinue
         Write-Host 'Original desktop graphics settings restored.'
     }

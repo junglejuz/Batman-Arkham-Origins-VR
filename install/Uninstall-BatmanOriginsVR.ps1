@@ -49,10 +49,16 @@ if (-not $Yes) {
 # ---- a VR launch that was cut short: its temporary graphics settings go first ------------------------------
 $journal = Join-Path $DataDir 'profile-active.json'
 if (Test-Path -LiteralPath $journal) {
+    # Skip files already equal to their original (a write Windows refused never changed them, WRITEDENIED). If one
+    # really cannot be put back, stop BEFORE anything is removed.
     $prof = Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json
     foreach ($file in $prof.files) {
+        if ((Test-Path -LiteralPath $file.path) -and (Get-FileHash -LiteralPath $file.path).Hash -eq $file.sha256) { continue }
         if ((Test-Path -LiteralPath $file.backup) -and (Get-FileHash -LiteralPath $file.backup).Hash -eq $file.sha256) {
-            [IO.File]::WriteAllBytes($file.path, [IO.File]::ReadAllBytes($file.backup))
+            try { [IO.File]::WriteAllBytes($file.path, [IO.File]::ReadAllBytes($file.backup)) }
+            catch { Fail ("Windows did not allow your graphics settings file $($file.path) to be put back. Your original is " +
+                          "saved at $($file.backup). Copy it back by hand, or allow PowerShell in Windows Security > Ransomware " +
+                          'protection > Controlled folder access, then run the uninstaller again. Nothing was removed.') }
         }
     }
     Remove-Item -LiteralPath $journal -Force
@@ -74,7 +80,16 @@ if (Test-Path (Join-Path $bk 'config\BmEngine.ini')) {
     Copy-Item (Join-Path $bk 'config\BmEngine.ini') $Engine -Force
     $docs = (Get-Content (Join-Path $bk 'documents_dir.txt') -ErrorAction SilentlyContinue | Select-Object -First 1)
     $g = Join-Path $bk "documents\$GfxName"
-    if ($docs -and (Test-Path $g) -and (Test-Path $docs)) { Copy-Item $g (Join-Path $docs $GfxName) -Force }
+    if ($docs -and (Test-Path $g) -and (Test-Path $docs)) {
+        # WRITEDENIED: if Windows refuses, stop here - the backup folder with the original is deleted only further down.
+        $target = Join-Path $docs $GfxName
+        if (-not (Test-Path $target) -or (Get-FileHash -LiteralPath $g).Hash -ne (Get-FileHash -LiteralPath $target).Hash) {
+            try { Copy-Item $g $target -Force }
+            catch { Fail ("The mod is removed, but Windows did not allow your graphics settings to be put back in $target. " +
+                          "Your original is saved at $g. Copy it there by hand, or allow PowerShell in Windows Security > " +
+                          'Ransomware protection > Controlled folder access, then run the uninstaller again.') }
+        }
+    }
     Say '  Your game settings are back as they were before the mod.' Green
 } else {
     Say '  No settings backup found: the game settings were left as they are (depth of field, motion blur and V-sync stay off).' Yellow

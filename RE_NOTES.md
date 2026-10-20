@@ -323,3 +323,7 @@ exits early when global 0x18E6228 ("User/Reflections" system setting, string
 setting off and clears it with the setting on — i.e. static one-time reflections
 when the option is off; no effect on per-eye re-capture with it on. Hook guard:
 `83ec1853558bd9837b3c00568b742428`. Live behaviour unobserved.
+
+
+## FIRSTPERSON (STATIC 2026-10-20)
+Pawn / head-bone offsets for first person, found by City's code shape: table and evidence in BUILD_PLAN "FIRSTPERSON"; code comment at the top of src/game/origins/first_person.cpp.
