@@ -1,3 +1,15 @@
+## HEADLOCK - first-person head through the camera (JJ 2026-10-20, seen in Asylum 0.1.3)
+
+Asylum's head read faulted every frame (unaligned matrix buffer, batman_asylum BUILD_PLAN HEADLOCK). Origins uses
+GetBoneLocation (City's route, which works there with an unaligned vector); its out buffer is now 16-byte aligned too, to
+be safe. Not yet run in Origins.
+Fix 2, HEADLOCK (both games): the 0.08 s head smoothing may trail the real head bone by at most 3 UU (~3 cm), so a fast
+lunge / glide cannot bring the head toward the camera (camera 25 cm in front of the face). Built, offline checks pass
+(Asylum d3d9_gpu_transport intermittently fails at random stages while the GPU is 94% loaded by other apps - the released
+0.1.3 DLL fails the same way now, it passed 3/3 this morning). Labelled 0.1.4, packaged, installed on JJ's game; NOT
+released. HEADSET next: run + glide in first person; log must show "first person head: mesh ..., Bip01_Head - eye point"
+and no "bone read faulted".
+
 ## RELEASE 0.1.3 (2026-10-20, JJ: "deploy both of those to github")
 
 First person (FIRSTPERSON, below) + launcher access-denied fix (WRITEDENIED, below). Version 0.1.3 (CMake, package).

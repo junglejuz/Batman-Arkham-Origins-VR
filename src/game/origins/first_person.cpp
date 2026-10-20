@@ -27,6 +27,10 @@ constexpr W kPCScanBegin = 0x100, kPCScanEnd = 0x700;         // PlayerControlle
 constexpr W kPawnController = 0x1E4, kPawnLocation = 0x48, kPawnEyeHeight = 0x2C0, kPawnMesh = 0x384, kMeshSkeleton = 0x1C4;
 constexpr W kFNameCtor = 0x485180, kGetBoneLocation = 0x84E590;
 constexpr float kHeadCapUU = 140.0f; // ~1.5 m: anything further is not his head (City)
+// HEADLOCK (JJ 2026-10-20: "when you start running or flying, the head moves ... the camera needs to be linked to the head
+// movements so that the head doesn't intersect the camera at any point"): the smoothing may trail the real head by at most
+// this much (~3 cm at 90 UU/m), far less than the 25 cm the camera sits in front of his face.
+constexpr float kHeadMaxLagUU = 3.0f;
 using FNameCtorFn = void*(__thiscall*)(void* name, const wchar_t* text, int findType, int unused);
 using GetBoneLocationFn = float*(__thiscall*)(void* mesh, float* out, W nameIndex, W nameNumber, int space);
 
@@ -115,7 +119,7 @@ void follow_head(uintptr_t pawn) {
     if (!object(mesh)) return miss("no mesh at pawn +0x384");
     if (!object(word(mesh + kMeshSkeleton))) return miss("mesh has no skeleton");
     if (!head_name()) return miss("Bip01_Head name failed");
-    float head[3] = {};
+    alignas(16) float head[4] = {};
     if (!bone(mesh, head)) return miss("bone read faulted");
     if (!finite3(head) || (head[0] == 0.0f && head[1] == 0.0f && head[2] == 0.0f)) return miss("no Bip01_Head bone");
     const float d[3] = {head[0] - eye[0], head[1] - eye[1], head[2] - eye[2]};
@@ -131,10 +135,13 @@ void follow_head(uintptr_t pawn) {
     headLastT = now;
     const float tau = headSmoothS.load(std::memory_order_relaxed);
     const float a = !headOffValid || tau <= 0.001f ? 1.0f : 1.0f - expf(-(dt > 0.1f ? 0.1f : dt) / tau);
-    for (int i = 0; i < 3; ++i) {
-        headOff[i] += (d[i] - headOff[i]) * a;
-        eye[i] += headOff[i];
+    float lag[3], lag2 = 0.0f;
+    for (int i = 0; i < 3; ++i) { headOff[i] += (d[i] - headOff[i]) * a; lag[i] = d[i] - headOff[i]; lag2 += lag[i] * lag[i]; }
+    if (lag2 > kHeadMaxLagUU * kHeadMaxLagUU) { // HEADLOCK: pull the smoothed point up to the real head
+        const float k = 1.0f - kHeadMaxLagUU / sqrtf(lag2);
+        for (int i = 0; i < 3; ++i) headOff[i] += lag[i] * k;
     }
+    for (int i = 0; i < 3; ++i) eye[i] += headOff[i];
     headOffValid = true;
     if (headFrames.fetch_add(1, std::memory_order_relaxed) == 0)
         BVR_LOG("[bo] first person head: mesh %08X, Bip01_Head - eye point = %.1f, %.1f, %.1f UU", unsigned(mesh), d[0], d[1], d[2]);
