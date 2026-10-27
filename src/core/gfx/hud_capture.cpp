@@ -217,6 +217,10 @@ int g_fovMismatchStreak = 0;
 int g_swfDrawsThisInterval = 0;
 std::atomic<bool> g_screenOnlyOn{false};
 int g_screenOnlyStreak = 0;
+// FASTTRAVEL2: a world pass seen within the last 250 ms. A 3-present streak never latched in the fast-travel cinematic (LIVE
+// 23:26: 4106 presents for 2637 draw roots, so world / no-world presents alternate).
+std::atomic<bool> g_worldPassOn{false};
+ULONGLONG g_worldPassMs = 0;
 
 // Session 42: one-shot edge-armed frame dump (0 off, 1 bar-draw, 2 screen-only).
 std::atomic<int> g_dumpEdge{0};
@@ -1399,6 +1403,13 @@ void on_present(ID3D11DeviceContext* ctx, IDXGISwapChain* swapchain) {
     // BEFORE the vote reset below. The 20-draw floor keeps single stray swf
     // draws (subtitle fade, console line) from tripping it.
     {
+        const ULONGLONG nowMs = GetTickCount64();
+        if (scene_leader() != nullptr) g_worldPassMs = nowMs;
+        const bool world = g_worldPassMs && nowMs - g_worldPassMs < 250;
+        if (world != g_worldPassOn.exchange(world, std::memory_order_relaxed))
+            BVR_LOG("[hud] world pass %s", world ? "ON (the game draws a 3D scene)" : "off (no 3D scene for 250 ms)");
+    }
+    {
         bool screenOnly = scene_leader() == nullptr && g_swfDrawsThisInterval >= 20;
         if (screenOnly != g_screenOnlyOn.load(std::memory_order_relaxed)) {
             if (++g_screenOnlyStreak >= 3) {
@@ -1661,6 +1672,12 @@ bool fov_mismatch() {
 bool screen_only() {
     return g_screenOnlyOn.load(std::memory_order_relaxed);
 }
+
+bool world_pass() {
+    return g_worldPassOn.load(std::memory_order_relaxed);
+}
+
+ID3D11Resource* scene_resource() { return scene_leader(); }
 
 bool letterbox(unsigned* topPx, unsigned* botPx) {
     uint32_t packed = g_lbBars.load(std::memory_order_relaxed);

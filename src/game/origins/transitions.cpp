@@ -1,6 +1,7 @@
 #include "transitions.h"
 #include "wipe.h"
 #include "core/gfx/gfx_hud.h"
+#include "core/gfx/hud_capture.h"
 #include "core/gfx/frame_inspector.h"
 #include "core/gfx/blit.h"
 #include "core/util/log.h"
@@ -8,6 +9,7 @@
 #include "core/vr/openxr_runtime.h"
 #include <windows.h>
 #include <d3d11.h>
+#include <d3dcompiler.h>
 #include <MinHook.h>
 #include <imgui.h>
 #include <algorithm>
@@ -83,12 +85,15 @@ bool load_recording() {
     return assetReady;
 }
 bool permitted(uint64_t now) {return enabled.load() && now>=originalUntil.load();}
+std::atomic<bool> probeFastTravel{false}; // FTPROBE: snapshot the next fast travel (command "probe")
 void synchronize(uint64_t now) {
     const unsigned n=events.load();
     if(!permitted(now)) {appliedEvents=n;playback.phase=wipe::Phase::Idle;return;}
     if(n!=appliedEvents) {
         appliedEvents=n;playback.event(eventAt.load());
         BVR_LOG("[bo bats] animation event %u: %s",n,playback.phase==wipe::Phase::Reveal?"black -> menu reveal":"bats -> black");
+        // FTPROBE (JJ 2026-10-26): on request only ("bo bats probe" in command.txt) since the video showed in run 23:40.
+        if(gfx_hud::menu_screen_on() && probeFastTravel.exchange(false)) vr::probe_arm("bats while the map is open = fast travel");
     }
 }
 void signal(uint64_t now) {
@@ -238,11 +243,93 @@ bool render_step(ID3D11DeviceContext* ctx,const wipe::Step& step) {
         step.invert ? 1-tail:1.f,step.invert ? 0.f:tail);
 }
 // EYEBATS: called by the runtime for every finished headset eye image (after DLSS / AFW / room screen).
+std::atomic<ULONGLONG> entryBlackUntil{0}; // ENTRYHOLD
+// ENTRYFADE (JJ 2026-10-27 night: "the black is fine, but it needs to fade into the game rather than just cut into it"): after the hold,
+// a black layer over the finished eye image fades out over kEntryFadeMs (alpha blend, own tiny pipeline, the caller's state kept).
+constexpr ULONGLONG kEntryFadeMs = 1000;
+ID3D11VertexShader* fadeVs = nullptr; ID3D11PixelShader* fadePs = nullptr; ID3D11Buffer* fadeCb = nullptr;
+ID3D11BlendState* fadeBlend = nullptr; ID3D11RasterizerState* fadeRs = nullptr; ID3D11DepthStencilState* fadeDs = nullptr;
+bool fadeFailed = false;
+bool fade_ready(ID3D11DeviceContext* ctx) {
+    if (fadeVs) return true;
+    if (fadeFailed) return false;
+    static const char src[] =
+        "cbuffer F : register(b0) { float4 a; };\n"
+        "float4 vs(uint id : SV_VertexID) : SV_Position { float2 t = float2((id << 1) & 2, id & 2); return float4(t * float2(2, -2) + float2(-1, 1), 0, 1); }\n"
+        "float4 ps(float4 p : SV_Position) : SV_Target { return float4(0, 0, 0, a.x); }\n";
+    ID3D11Device* dev = nullptr; ctx->GetDevice(&dev);
+    ID3DBlob *v = nullptr, *f = nullptr;
+    bool ok = dev && SUCCEEDED(D3DCompile(src, sizeof(src) - 1, "bo_entryfade", nullptr, nullptr, "vs", "vs_4_0", 0, 0, &v, nullptr)) &&
+              SUCCEEDED(D3DCompile(src, sizeof(src) - 1, "bo_entryfade", nullptr, nullptr, "ps", "ps_4_0", 0, 0, &f, nullptr)) &&
+              SUCCEEDED(dev->CreateVertexShader(v->GetBufferPointer(), v->GetBufferSize(), nullptr, &fadeVs)) &&
+              SUCCEEDED(dev->CreatePixelShader(f->GetBufferPointer(), f->GetBufferSize(), nullptr, &fadePs));
+    if (v) v->Release();
+    if (f) f->Release();
+    if (ok) {
+        D3D11_BUFFER_DESC cd{16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0};
+        D3D11_BLEND_DESC bd{};
+        bd.RenderTarget[0].BlendEnable = TRUE;
+        bd.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA; bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO; bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        D3D11_RASTERIZER_DESC rd{}; rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
+        D3D11_DEPTH_STENCIL_DESC dd{};
+        ok = SUCCEEDED(dev->CreateBuffer(&cd, nullptr, &fadeCb)) && SUCCEEDED(dev->CreateBlendState(&bd, &fadeBlend)) &&
+             SUCCEEDED(dev->CreateRasterizerState(&rd, &fadeRs)) && SUCCEEDED(dev->CreateDepthStencilState(&dd, &fadeDs));
+    }
+    if (dev) dev->Release();
+    fadeFailed = !ok;
+    BVR_LOG("[bo] ENTRYFADE %s", ok ? "ready" : "setup FAILED - the hold ends with a cut");
+    return ok;
+}
+void fade_black(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, uint32_t w, uint32_t h, float alpha) {
+    if (!fade_ready(ctx)) return;
+    ID3D11RenderTargetView* oRtv[8] = {}; ID3D11DepthStencilView* oDsv = nullptr; ctx->OMGetRenderTargets(8, oRtv, &oDsv);
+    ID3D11BlendState* oB = nullptr; FLOAT bf[4]; UINT mask = 0; ctx->OMGetBlendState(&oB, bf, &mask);
+    ID3D11DepthStencilState* oD = nullptr; UINT ref = 0; ctx->OMGetDepthStencilState(&oD, &ref);
+    ID3D11RasterizerState* oR = nullptr; ctx->RSGetState(&oR);
+    UINT nvp = 1; D3D11_VIEWPORT oVp{}; ctx->RSGetViewports(&nvp, &oVp);
+    ID3D11VertexShader* oVs = nullptr; ctx->VSGetShader(&oVs, nullptr, nullptr);
+    ID3D11HullShader* oHs = nullptr; ctx->HSGetShader(&oHs, nullptr, nullptr);
+    ID3D11DomainShader* oDs = nullptr; ctx->DSGetShader(&oDs, nullptr, nullptr);
+    ID3D11GeometryShader* oGs = nullptr; ctx->GSGetShader(&oGs, nullptr, nullptr);
+    ID3D11PixelShader* oPs = nullptr; ctx->PSGetShader(&oPs, nullptr, nullptr);
+    ID3D11Buffer* oCb = nullptr; ctx->PSGetConstantBuffers(0, 1, &oCb);
+    ID3D11InputLayout* oIl = nullptr; ctx->IAGetInputLayout(&oIl);
+    D3D11_PRIMITIVE_TOPOLOGY oTopo{}; ctx->IAGetPrimitiveTopology(&oTopo);
+    const float a[4] = {alpha, 0, 0, 0};
+    ctx->UpdateSubresource(fadeCb, 0, nullptr, a, 0, 0);
+    ctx->OMSetRenderTargets(1, &rtv, nullptr);
+    ctx->OMSetBlendState(fadeBlend, nullptr, 0xFFFFFFFF); ctx->OMSetDepthStencilState(fadeDs, 0); ctx->RSSetState(fadeRs);
+    D3D11_VIEWPORT vp{0, 0, float(w), float(h), 0, 1}; ctx->RSSetViewports(1, &vp);
+    ctx->IASetInputLayout(nullptr); ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(fadeVs, nullptr, 0); ctx->HSSetShader(nullptr, nullptr, 0); ctx->DSSetShader(nullptr, nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0); ctx->PSSetShader(fadePs, nullptr, 0); ctx->PSSetConstantBuffers(0, 1, &fadeCb);
+    ctx->Draw(3, 0);
+    ctx->OMSetRenderTargets(8, oRtv, oDsv); ctx->OMSetBlendState(oB, bf, mask); ctx->OMSetDepthStencilState(oD, ref); ctx->RSSetState(oR);
+    if (nvp) ctx->RSSetViewports(1, &oVp);
+    ctx->VSSetShader(oVs, nullptr, 0); ctx->HSSetShader(oHs, nullptr, 0); ctx->DSSetShader(oDs, nullptr, 0); ctx->GSSetShader(oGs, nullptr, 0);
+    ctx->PSSetShader(oPs, nullptr, 0); ctx->PSSetConstantBuffers(0, 1, &oCb); ctx->IASetInputLayout(oIl); ctx->IASetPrimitiveTopology(oTopo);
+    IUnknown* all[] = {oDsv, oB, oD, oR, oVs, oHs, oDs, oGs, oPs, oCb, oIl};
+    for (IUnknown* u : all) if (u) u->Release();
+    for (auto* r : oRtv) if (r) r->Release();
+}
 bool paint_eye(ID3D11DeviceContext* ctx,int,ID3D11RenderTargetView* rtv,uint32_t w,uint32_t h,
                float shiftX,float shiftY,bool projection,int64_t frame) {
     const auto now=GetTickCount64();
     if(projection) lastProjectionMs.store(now);
     synchronize(now);
+    if(ctx && rtv && now<entryBlackUntil.load()) { // ENTRYHOLD: still the loading screen's black while the world loads in
+        frame_inspector::ScopedSuppress quiet;
+        const float k[4]={0,0,0,1}; ctx->ClearRenderTargetView(rtv,k); return true;
+    }
+    if(ctx && rtv && entryBlackUntil.load() && now<entryBlackUntil.load()+kEntryFadeMs) { // ENTRYFADE: then fade into the game
+        frame_inspector::ScopedSuppress quiet;
+        fade_black(ctx,rtv,w,h,1.0f-float(now-entryBlackUntil.load())/float(kEntryFadeMs));
+        return true;
+    }
     if(!ctx || !rtv || !permitted(now)) return false;
     frame_inspector::ScopedSuppress quiet;
     if(!bootDone.load() && events.load()) {bootDone.store(true);BVR_LOG("[bo bats] BOOTBLACK done (title exit)");}
@@ -257,7 +344,20 @@ bool paint_eye(ID3D11DeviceContext* ctx,int,ID3D11RenderTargetView* rtv,uint32_t
         // One step per XR frame: both eyes of a pair show the same picture, whichever is written first.
         if(frame!=lastFrame || now-lastTickMs>40) {
             lastFrame=frame;lastTickMs=now;
-            lastStep=playback.tick(now,projection,recording.times.back());
+            // FASTTRAVEL (JJ 2026-10-26: fast travel "played a cutscene but I saw nothing in the headset it was just black"; LIVE
+            // log 23:20:59-23:21:26: bats -> black, then an in-engine cinematic on the cinematic screen, never back to
+            // projection = black held until quit). A 3D world drawn onto the cinematic screen ends the black hold like
+            // projection does; loading / FMV screens draw no world pass and stay black.
+            // FASTTRAVEL3 (JJ 23:31 "It's still not working"; LIVE 23:31:01: letterbox ON, world pass OFF, "3D scene NOT seen"):
+            // the fast-travel cutscene is a full-screen VIDEO (IsPlayingFullScreenMovie TRUE), not a 3D scene. The flat game
+            // shows it, so any real picture on the cinematic screen ends the hold: a 3D scene, or the letterboxed video (the
+            // pixel watch reports bars only around picture content; an all-black frame reads as no bars).
+            const bool cineVideo=!projection && vr::cinematic_active() && hud::letterbox(nullptr,nullptr);
+            const bool cineWorld=!projection && vr::cinematic_active() && (hud::world_pass() || cineVideo);
+            const bool held=playback.phase==wipe::Phase::Hold;
+            lastStep=playback.tick(now,projection || cineWorld,recording.times.back());
+            if(held && cineWorld && playback.phase==wipe::Phase::Reveal)
+                BVR_LOG("[bo bats] reveal onto the cinematic screen (%s)",cineVideo?"letterboxed video / cinematic":"3D scene");
         }
         if(lastStep.visual==wipe::Visual::None) return false;
         black=lastStep.visual==wipe::Visual::Black;
@@ -390,6 +490,7 @@ bool command(const char* args) {
     else if(!strcmp(args,"off")) enabled.store(false);
     else if(!strcmp(args,"original")) originalUntil.store(GetTickCount64()+15000);
     else if(!strcmp(args,"record")) recordNext.store(true);
+    else if(!strcmp(args,"probe")) { probeFastTravel.store(true); BVR_LOG("[bo bats] FTPROBE armed for the next fast travel"); }
     else if(!strcmp(args,"status")) { status();return true; }
     else return false;
     settings_save();return true;
@@ -632,4 +733,5 @@ extern "C" __declspec(dllexport) DWORD WINAPI BO_TransitionSelftest(ID3D11Device
     playback={};pixels.clear();
     return ok?0:2;
 }
+void hold_black(unsigned ms) { entryBlackUntil.store(GetTickCount64() + ms); }
 }

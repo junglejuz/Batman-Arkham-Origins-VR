@@ -260,6 +260,13 @@ int get_pose_lag();
 // came from; the adapter hands that id back (render thread, before the frame's Present) with
 // sr_set_present_gen, and the projection layer is tagged with that locate's own views.
 bool get_head_pose_gen(HeadPose& out, uint32_t* gen);
+// STEREOPOSE: published only after BOTH locate calls finish. One coherent generation.
+struct StereoPose {
+    HeadPose head{}, eyes[2]{};
+    float angles[2][4]{};
+    uint32_t generation{};
+};
+bool get_stereo_pose(StereoPose& out);
 // Origins: retrieve both complete eye poses and lenses from the SAME located generation.
 bool get_eye_pose_gen(uint32_t gen, int eye, HeadPose& out, float angles[4]);
 void sr_set_present_gen(uint32_t gen);
@@ -337,6 +344,9 @@ void repeat_stats(uint32_t* repeats, uint32_t* newFrames, uint32_t* late);
 // loading screens); SCREENROOM draws flat screens into both eyes as a screen in the room.
 void set_flat_screen(bool on);
 void save_eye_pictures(const wchar_t* dir); // next left + right eye frames -> dir\eye_left.bmp / eye_right.bmp
+// FTPROBE (JJ 2026-10-26, fast travel black): 3 automatic shots at +0.4 / +2 / +5 s - the game frame, both submitted eye images and
+// a log line naming the layer sent - into captures\probe_<tick>\shot<n>. Armed once per launch by the adapter.
+void probe_arm(const char* why);
 // Batman City: counts runtime recentres (Meta button held) once they take effect; the adapter
 // re-zeroes its own straight-ahead when this changes.
 uint32_t runtime_recenter_count();
@@ -347,6 +357,8 @@ void set_vignette_look(float strength, float clearDeg, float rampDeg);
 void get_vignette_look(float* strength, float* clearDeg, float* rampDeg);
 // HUD quad: room-fixed by default (AKVR); true = attached to the head (view space).
 void set_hud_head_locked(bool on);
+// HUDAIM: true while the player aims (left trigger held, gameplay) - the HUD rides the head for that time.
+void set_hud_aim_head(bool on);
 // HUDEYES: the HUD panel as one quad per eye, moved by each eye's offset (real depth under Virtual Desktop).
 // -1 = auto (on under Virtual Desktop), 0 = off, 1 = on.
 void set_hud_eyes(int mode);

@@ -529,6 +529,7 @@ std::atomic<float> g_cutScale{1.6f};
 std::atomic<int> g_fadeHoldMode{1};
 std::atomic<ULONGLONG> g_fadeUntil{0};
 std::atomic<bool> g_fadeHold{false};
+std::atomic<ULONGLONG> g_entryPanelUntil{0}; // ENTRYHOLD
 ID3D11Texture2D* g_fadeProbe[3] = {};
 bool g_fadeProbeUsed[3] = {};
 uint32_t g_fadeSeq = 0;
@@ -538,8 +539,11 @@ ULONGLONG g_fadeStart = 0;
 // and on two probes in a row; no box seen within 0.7 s (a load into the menus) = panel back.
 bool g_fadeSeen = false;
 int g_fadeClear = 0;
-constexpr int kFadePts = 5;
-const float kFadePt[kFadePts][2] = {{0.25f, 0.27f}, {0.75f, 0.27f}, {0.5f, 0.5f}, {0.25f, 0.72f}, {0.75f, 0.72f}};
+// FADEMID (Origins, JJ 2026-10-27 night: "still a square in the middle of the field of view when entering gameplay"): four more points
+// around the centre, so a box covering only the middle of the panel is seen too (points 0-4 as City; 5-8 inner ring).
+constexpr int kFadePts = 9;
+const float kFadePt[kFadePts][2] = {{0.25f, 0.27f}, {0.75f, 0.27f}, {0.5f, 0.5f}, {0.25f, 0.72f}, {0.75f, 0.72f},
+                                    {0.40f, 0.40f}, {0.60f, 0.40f}, {0.40f, 0.60f}, {0.60f, 0.60f}};
 
 void fade_end(const char* why) {
     if (g_fadeHold.exchange(false))
@@ -577,14 +581,20 @@ void fade_tick(ID3D11DeviceContext* ctx) {
     D3D11_MAPPED_SUBRESOURCE m{};
     if (FAILED(ctx->Map(g_fadeProbe[old], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m))) return;
     const uint8_t* p = static_cast<const uint8_t*>(m.pData);
-    int covered = 0;
+    bool dark[kFadePts] = {};
     for (int i = 0; i < kFadePts; ++i) {
         const uint8_t* c = p + i * 4;
-        if (c[3] > 12 && c[0] < 40 && c[1] < 40 && c[2] < 40) ++covered;
+        dark[i] = c[3] > 12 && c[0] < 40 && c[1] < 40 && c[2] < 40;
     }
     ctx->Unmap(g_fadeProbe[old], 0);
     g_fadeProbeUsed[old] = false;
-    if (covered == kFadePts) { g_fadeSeen = true; g_fadeClear = 0; return; }
+    const int outer = int(dark[0]) + dark[1] + dark[2] + dark[3] + dark[4], inner = int(dark[5]) + dark[6] + dark[7] + dark[8];
+    const bool box = outer == 5 || (dark[2] && inner >= 3); // the whole panel (City) or its middle (FADEMID)
+    if (box) {
+        if (!g_fadeSeen) BVR_LOG("gfx_hud: fade-in box seen (%s) %llu ms after the 3D scene came back - panel held",
+                                 outer == 5 ? "whole panel" : "middle", GetTickCount64() - g_fadeStart);
+        g_fadeSeen = true; g_fadeClear = 0; return;
+    }
     if (g_fadeSeen) {
         if (++g_fadeClear >= 2) fade_end("panel clear");
     } else if (GetTickCount64() - g_fadeStart > 700) {
@@ -2368,6 +2378,7 @@ void set_stage_box(bool on) { g_stageBox.store(on); BVR_LOG("gfx_hud: stage box 
 void set_menu_cut(bool on) { g_menuCut.store(on); BVR_LOG("gfx_hud: menu cut pieces %s", on ? "ALL in the eye (outside gameplay)" : "as before"); }
 void set_halo(float strength) { g_halo.store(strength, std::memory_order_relaxed); }
 
+void hold_panel(unsigned ms) { g_entryPanelUntil.store(GetTickCount64() + ms + 500); } // + half the ENTRYFADE
 void set_fade_hold(int mode) {
     g_fadeHoldMode.store(mode);
     BVR_LOG("gfx_hud: fade-in box after loading %s", mode ? "HIDDEN (panel held while it covers the panel)" : "shown (old)");
@@ -2646,6 +2657,7 @@ ID3D11Texture2D* texture(ID3D11DeviceContext* ctx) {
     // pauses keep drawing UI; movies/loads go stale and the quad drops).
     if (g_presents - g_lastHudFrame > 8) return nullptr;
     if (g_fadeHold.load(std::memory_order_relaxed)) return nullptr; // FADEHOLD: the fade-in box covers the panel
+    if (GetTickCount64() < g_entryPanelUntil.load(std::memory_order_relaxed)) return nullptr; // ENTRYHOLD
     if (g_wipePanelOff.load(std::memory_order_relaxed) &&
         (g_replayOn.load(std::memory_order_relaxed) || GetTickCount64() < g_hideAllUntil))
         return nullptr; // WIPEPANEL: no panel layer during a wipe replay

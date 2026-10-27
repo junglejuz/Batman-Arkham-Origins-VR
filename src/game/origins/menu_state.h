@@ -24,5 +24,7 @@ bool screen_menu_open();                     // MS3: an open menu that is not a 
 unsigned long long menu_open_at();           // GetTickCount64 of the last opening / closing
 unsigned long long menu_closed_at();
 void clear_stale(const char* why);           // the adapter's safety: the game has run on for a while
+// ENTRYHOLD: GetTickCount64 of the last IsPlayingFullScreenMovie answer TRUE (loading screens / videos), 0 = never.
+unsigned long long movie_seen_at();
 
 } // namespace bvr::bo::menu_state

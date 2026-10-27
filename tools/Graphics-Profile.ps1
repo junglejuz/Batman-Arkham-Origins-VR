@@ -31,7 +31,12 @@ function Disable-OriginsDepthOfField([string]$Gfx,[string]$Engine,[string]$DataD
     $targets=@($Engine); if($Gfx) { $targets=@($Gfx,$Engine) }
     $old=@{}; foreach($path in $targets) { $old[$path]=[IO.File]::ReadAllBytes($path) }
     $new=@{}
-    if($Gfx) { $new[$Gfx]=Set-OriginsOption ([Text.Encoding]::Unicode.GetString($old[$Gfx])) 'DepthOfField' 'OFF' }
+    if($Gfx) {
+        $gt=Set-OriginsOption ([Text.Encoding]::Unicode.GetString($old[$Gfx])) 'DepthOfField' 'OFF'
+        # LENSFLAREOFF removed 2026-10-27 (JJ: "put back the original lens flare and fix it so that lens flares do not rotate with
+        # head rolls"): the player's own LensFlares choice is left alone; the mod keeps the streaks level (FLAREROLL).
+        $new[$Gfx]=$gt
+    }
     $et=[Text.Encoding]::Unicode.GetString($old[$Engine])
     foreach($key in @('DepthOfField','NVDOF','DisableHighQualityDOF')) {
         $pattern='(?mi)^('+[regex]::Escape($key)+'=)[^\r\n]*'
@@ -53,5 +58,5 @@ function Disable-OriginsDepthOfField([string]$Gfx,[string]$Engine,[string]$DataD
     }
     @{reason='JJ requested all DoF off';backup=$backup;files=@($targets | ForEach-Object { @{path=$_;sha256=(Get-FileHash -LiteralPath $_).Hash} })} |
         ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $backup 'receipt.json') -Encoding UTF8
-    Write-Host "All saved DoF options disabled. Previous settings backed up in $backup"
+    Write-Host "Depth of field switched off for VR. Previous settings backed up in $backup"
 }

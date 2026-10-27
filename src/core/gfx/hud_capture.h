@@ -328,6 +328,12 @@ bool backbuffer_dims(unsigned* w, unsigned* h);
 //   postfx_count  lifetime count of post-tonemap draws left IN-FRAME because
 //                 they sample a backbuffer-sized texture (alcohol blur etc.).
 bool screen_only();
+// FASTTRAVEL (JJ 2026-10-26): the game drew a world pass (scene vote leader) within the last 250 ms. True in gameplay and
+// in-engine cinematics, false on loading / FMV / hack screens and black frames. Edges are logged ("[hud] world pass").
+bool world_pass();
+// GLOWSCENE: this present interval's scene render target so far (the resource the world pass drew into: the vote leader),
+// or null. Render thread. Not referenced (identity only).
+ID3D11Resource* scene_resource();
 unsigned postfx_count();
 
 // Session 22 round 2: engine-cinematic letterbox (plasmid FMV sequences

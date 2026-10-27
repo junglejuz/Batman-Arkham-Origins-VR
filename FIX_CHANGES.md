@@ -226,6 +226,33 @@ are retained. O1H live/headset proof is pending. Reference: playbook 09
 #typeless-swapchain, framework guide 10 sections 1/2.4, VR_HUD_GUIDE sections 6/8;
 checkout `b955f2244f7c5d5f3b3e5f403b1b6721a3362423`.
 
+## FLAREROLL (2026-10-27 evening) - lens flares back on (LENSFLAREOFF undone)
+
+JJ: "put back the original lens flare and fix it so that lens flares do not rotate with head rolls". The mod now keeps the streaks level.
+
+| File | Change | Why | Undo |
+|---|---|---|---|
+| GFXSettings xml (Documents) | `LensFlares` `false` -> `true` (JJ's store; UTF-16 + BOM kept) | the game menu's own choice restored | copy in backups/pre-FLAREROLL-2026-10-27 |
+| `tools/Graphics-Profile.ps1` (+ installed copy) | no longer writes LensFlares (store or BmEngine.ini) | player's own choice | previous script in the same backup |
+
+JJ's BmEngine.ini keeps its own `LensFlares=False` (his value before any mod change; the store governs).
+
+## LENSFLAREOFF (2026-10-27) - lens flares off for VR
+
+JJ 2026-10-26: "Anamorphic glows or blooms on lights are currently rotating with head movements, they should not do that".
+VR_ESSENTIALS 7 (force lens flares off; screen-space, never fuse / stay put); City FIX_CHANGES 2026-10-08 and Knight LENSFLAREOFF did
+the same. Found: JJ's BmEngine.ini already `LensFlares=False`, but the GSA store (the game menu's) `LensFlares` Value="true".
+
+| File | Change | Why | Undo |
+|---|---|---|---|
+| GFXSettings xml (Documents) | `LensFlares` -> `false` | the game menu's store said true | per-launch journal restores it after the game exits; installer backup |
+| BmEngine.ini | every `LensFlares=` -> `False` (if present) | same | same |
+
+Code: `tools/Graphics-Profile.ps1` Disable-OriginsDepthOfField (used by the launcher every VR launch AND by the installer), receipt
+reason updated. Tested on copies of JJ's two files (UTF-16 encodings / BOM preserved, LensFlares false in both). Installed into
+`<game>\SinglePlayer\Binaries\Win32\OriginsVR\Graphics-Profile.ps1` (sha256 FAFC7A81..., manifest updated + all files re-checked;
+previous copy in backups/pre-LENSFLAREOFF-2026-10-27). HEADSET pending: confirms only if the rotating glows are the lens flares.
+
 ## RELEASE 0.1.0 installer / uninstaller (2026-10-14) - every change to files we did not write
 
 Installer (`install/Install-BatmanOriginsVR.ps1`), all edits byte-preserving UTF-16 through `tools/Graphics-Profile.ps1`:

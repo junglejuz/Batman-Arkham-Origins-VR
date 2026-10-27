@@ -132,6 +132,8 @@ void set_map_screen(bool on); // MAPSCREEN: big untextured shapes = the map: wip
 void set_stage_box(bool on); // STAGEBOX / FIRSTCUT / FADESKIP (default on)
 void set_menu_cut(bool on); // MENUCUT test: outside gameplay every cut-type piece stays in the eye image
 void set_halo(float strength); // PAUSEHALO: soft dark halo under the panel's content (0 = off), set every frame
+// ENTRYHOLD: no HUD panel until GetTickCount64() + ms.
+void hold_panel(unsigned ms);
 void set_fade_hold(int mode); // FADEHOLD: 1 = no HUD panel while the after-loading fade-in box covers it, 0 = off
 int fade_hold();
 void note_movie_ended(); // FADEHOLD: start watching the panel (up to 3 s)

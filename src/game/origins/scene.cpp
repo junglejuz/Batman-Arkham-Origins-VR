@@ -4,12 +4,15 @@
 #include "afw.h"
 #include "dlss_bridge.h"
 #include "first_person.h"
+#include "flare_roll.h"
+#include "aim_depth.h"
 #include "menu_state.h"
 #include "reflect.h"
 #include "core/vr/eye_burst.h"
 #include "core/framework/command.h"
 #include "core/gfx/gfx_hud.h"
 #include "core/gfx/hud_capture.h"
+#include "core/gfx/frame_inspector.h"
 #include "startup.h"
 #include "transitions.h"
 #include "core/hooks/d3d11_hook.h"
@@ -52,6 +55,15 @@ std::atomic<bool> installed{false},camera{true},native{true},poisoned{false},hud
 std::atomic<bool> mapRec{false}; // MAPREC: record every map opening / closing (test only since RELEASE 0.1.0: `bo maprec on`)
 std::atomic<bool> viewDebounce{true}; // VIEWDEBOUNCE: one frame without a 3D view does not leave head-tracked mode
 std::atomic<W> gameplayCaller{0},lastViewCaller{0},draws{0},seconds{0},edits{0},invalid{0},begins{0},tagMiss{0};
+std::atomic<W> noPose{0}; // STEREOPOSE: draw roots with no complete head + eyes sample (each would render flat)
+std::atomic<bool> pauseDirtRemove{true};                     // PAUSEDIRT (below): pause grime drawn with white
+std::atomic<bool> loadBurst{true};                           // LOADBURST (on_present): one recording when a load ends
+std::atomic<bool> camHold{true};                             // CAMHOLD (ctor_detour): keep the last good game camera
+std::atomic<float> entryHoldS{2.5f};                         // ENTRYHOLD: black after a load (s)
+std::atomic<bool> hudAim{true};                              // HUDAIM (calc_detour): the HUD rides the head while aiming
+std::atomic<ULONGLONG> streakTestAt{0};                      // STREAKTEST (panel): start time, 0 = idle
+std::atomic<unsigned> camHeld{0},camCuts{0};
+std::atomic<unsigned> pauseDirtRemoved{0},pauseDirtMatches{0};
 std::atomic<float> worldScale{90.0f},resolutionScale{1.0f};
 std::atomic<bool> recentre{true},captureRequested{false};
 std::atomic<unsigned> backW{0},backH{0};
@@ -164,6 +176,8 @@ W __fastcall begin_detour(void* self,void* edx) {
     afw::set_render_slot(tag.slot);
     dlss_bridge::set_render_slot(tag.slot);
     reflect::set_render_pass(begins.load(),tag.sign);
+    flare_roll::note_eye_pass(tag.sign); // FLAREROLL: this eye's tilt for the lens-flare steps
+    aim_depth::note_eye_pass(tag.sign); // AIMDEPTH: the left eye's depth under the head's aim
     begins++;
     return beginOriginal(self,edx);
 }
@@ -174,12 +188,16 @@ bool second_draw(void* self,void* edx,W a1) {
 void status() {
     vr::PairProbe pair{}; vr::pair_probe(&pair);
     BVR_LOG("[bo] status: hooks=%d caller=%08X last-view-caller=%08X camera=%d native=%d poison=%d "
-        "root=%u second=%u view-edits=%u rejected=%u begin=%u tag-miss=%u presents=%llu pairs=%u abort=%u "
+        "root=%u second=%u view-edits=%u rejected=%u begin=%u tag-miss=%u no-pose=%u presents=%llu pairs=%u abort=%u "
         "actual-size=%ux%u runtime=%s",installed.load(),gameplayCaller.load(),lastViewCaller.load(),
         camera.load(),native.load(),poisoned.load(),draws.load(),seconds.load(),edits.load(),invalid.load(),
-        begins.load(),tagMiss.load(),d3d11_hook::present_count(),pair.pairs,pair.aborts,
+        begins.load(),tagMiss.load(),noPose.load(),d3d11_hook::present_count(),pair.pairs,pair.aborts,
         backW.load(),backH.load(),vr::session_state_name());
     for(auto& c:callers) if(c.address.load()) BVR_LOG("[bo] root caller RVA %08X: %u",c.address.load(),c.count.load());
+    BVR_LOG("[bo] PAUSEDIRT remove=%d: grime passes seen %u, drawn without dirt %u | CAMHOLD %d: pairs held %u, real cuts taken %u | FADEHOLD %d",
+            pauseDirtRemove.load()?1:0,pauseDirtMatches.load(),pauseDirtRemoved.load(),camHold.load()?1:0,camHeld.load(),camCuts.load(),gfx_hud::fade_hold());
+    { char g[200]; flare_roll::status_line(g,sizeof g); BVR_LOG("[bo] %s",g); }
+    { char g[200]; aim_depth::status_line(g,sizeof g); BVR_LOG("[bo] %s",g); }
     char line[1800]{}; afw::status_line(line,sizeof(line)); BVR_LOG("%s",line);
     dlss_bridge::status_line(line,sizeof(line)); BVR_LOG("%s",line);
     menu_state::status_line(line,sizeof(line)); BVR_LOG("[bo] %s | MAPBLIT2 passes without a scene blit blanked %u",line,gfx_hud::map_blits_provisional());
@@ -209,9 +227,14 @@ void __fastcall draw_detour(void* self,void* edx,W a1) {
     }
     if(GetAsyncKeyState(VK_F11)&1) set_camera(!camera.load());
     if(GetAsyncKeyState(VK_F2)&1) captureRequested.store(true);
-    // Same raw head + both complete eye poses/FOVs, one generation, before either render.
-    poseValid=vr::get_head_pose_gen(head,&poseGen);
-    if(poseValid) for(int e=0;e<2;e++) poseValid=vr::get_eye_pose_gen(poseGen,e,eyes[e],angles[e]) && poseValid;
+    // Same raw head + both complete eye poses/FOVs, one generation, before either render. STEREOPOSE (Asylum HEAD-AIM4,
+    // Godoy301): one mailbox read; the old head-then-eyes read could see a new head before its eyes = one flat frame.
+    {
+        vr::StereoPose stereo{};
+        poseValid=vr::get_stereo_pose(stereo);
+        if(poseValid) { head=stereo.head; poseGen=stereo.generation; memcpy(eyes,stereo.eyes,sizeof(eyes)); memcpy(angles,stereo.angles,sizeof(angles)); }
+        else ++noPose;
+    }
     if(poseValid) {
         if(recentre.exchange(false)) {
             refYaw=std::atan2(2*(head.qx*head.qz+head.qw*head.qy),1-2*(head.qx*head.qx+head.qy*head.qy));
@@ -300,8 +323,12 @@ void* __fastcall calc_detour(void* self,void* edx,void* family,float* loc,int32_
     }
     const bool ours=depth && viewport==viewportNow;
     // FIRSTPERSON: this pair's eye point, from the first eye's pass (the second eye reuses it). self = the ULocalPlayer.
-    if(ours && eyeSign && (eyeSign<0 || afwFrame))
-        first_person::update(self,menu_state::live() && menu_state::menu_open() ? "menu (pause, map, upgrades)" : nullptr);
+    if(ours && eyeSign && (eyeSign<0 || afwFrame)) {
+        const bool menuUp=menu_state::live() && menu_state::menu_open();
+        first_person::update(self,menuUp ? "menu (pause, map, upgrades)" : nullptr);
+        // HUDAIM (JJ 2026-10-27: "The HUD should move with my head when holding down the left Trigger"): first and third person.
+        vr::set_hud_aim_head(hudAim.load() && !menuUp && first_person::left_trigger_now());
+    }
     if(ours) ++calcDepth;
     void* out=calcOriginal(self,edx,family,loc,rot,viewport,drawer);
     if(ours) --calcDepth;
@@ -319,13 +346,139 @@ void* __fastcall ctor_detour(void* self,void* edx,A28) {
     }
     foundView=true;
     if(!eyeSign || !poseValid) return ctorOriginal(self,edx,P28(a14,a15));
-    first_person::apply(base.m,worldScale.load()); // FIRSTPERSON: the game camera at his eyes (everything below follows it)
+    {   // CAMHOLD (JJ 2026-10-26: pause menu "black frames"; FLIPWATCH 00:09:06 / 00:12:25: for ~1.5 s after a pause-type menu
+        // closes the GAME camera alternates between unrelated views - pitch 79.7 / -71.4 / 70.1 ... - pair by pair; playbook
+        // b955f224 FAIL-STR-017 -> STR-010 "drop a bad frame"): while a pause-type menu is up or < 3 s after one closed, a pair whose
+        // game camera jumps > 25 deg or > 150 UU from the last good one is drawn from the last good camera instead; a new camera
+        // that holds for 3 pairs in a row is a real cut and is taken. Counted ("held" / "cuts" in the status line).
+        static M4 good{},cand{}; static bool haveGood=false,pairHeld=false; static int pending=0;
+        auto fwd=[](const M4& m,float f[3]){ f[0]=m.m[0][2]; f[1]=m.m[1][2]; f[2]=m.m[2][2]; };
+        auto org=[](const M4& m,float o[3]){ for(int i=0;i<3;i++) o[i]=-(m.m[3][0]*m.m[i][0]+m.m[3][1]*m.m[i][1]+m.m[3][2]*m.m[i][2]); };
+        auto jump=[&](const M4& a,const M4& b){
+            float fa[3],fb[3],oa[3],ob[3]; fwd(a,fa); fwd(b,fb); org(a,oa); org(b,ob);
+            const float dot=fa[0]*fb[0]+fa[1]*fb[1]+fa[2]*fb[2];
+            const float d=std::sqrt((oa[0]-ob[0])*(oa[0]-ob[0])+(oa[1]-ob[1])*(oa[1]-ob[1])+(oa[2]-ob[2])*(oa[2]-ob[2]));
+            return dot<0.906f || d>150.0f; // 25 deg
+        };
+        if(eyeSign<0 || afwFrame) { // decide once per pair, on its first eye
+            pairHeld=false;
+            const ULONGLONG nowMs=GetTickCount64();
+            // CAMHOLD2 (JJ 2026-10-26: "What about the flicker when entering the pause menu?"): always on, not only around menus -
+            // a real cut costs 2 pairs (~22 ms) of the old camera; no gameplay camera turns 25 deg or moves 1.5 m in one frame.
+            // Each hold logs the menu context, so the next run shows whether holds come on entering, inside or after a menu.
+            const bool pauseType=menu_state::live() && menu_state::menu_open() && !menu_state::screen_menu_open();
+            const ULONGLONG sinceOpen=nowMs-menu_state::menu_open_at(),sinceClose=menu_state::menu_closed_at() ? nowMs-menu_state::menu_closed_at() : ~0ull;
+            if(!haveGood || !camHold.load() || !jump(base,good)) { good=base; haveGood=true; pending=0; }
+            else {
+                if(pending>0 && !jump(base,cand)) ++pending; else { pending=1; cand=base; }
+                if(pending>=3) { good=base; pending=0; camCuts.fetch_add(1,std::memory_order_relaxed); }
+                else {
+                    pairHeld=true;
+                    if(camHeld.fetch_add(1,std::memory_order_relaxed)<60)
+                        BVR_LOG("[bo] CAMHOLD: game camera jumped - pair drawn from the last good camera (%s; last menu open %llu ms ago, last close %llu ms ago)",
+                                pauseType ? "pause-type menu UP" : menu_state::menu_open() ? "screen menu up" : "no menu",
+                                (unsigned long long)sinceOpen,(unsigned long long)sinceClose);
+                }
+            }
+        }
+        if(pairHeld) base=good;
+    }
+    {   // FIRSTPERSON: the game camera at his eyes (everything below follows it); HEADAIM gets the pair's head orientation
+        const float hq[4]={head.qx,head.qy,head.qz,head.qw};
+        first_person::apply(base.m,worldScale.load(),hq,eyeSign<0 || afwFrame,eyeSign>0 || afwFrame);
+    }
     int e=eyeSign<0 ? 0 : 1;
     M4 view=mul(base,delta(eyes[e]));
+    {   // LEANBACK: in first person the lens never goes back into his head when the player leans back
+        float o[3];
+        for(int i=0;i<3;i++) o[i]=-(view.m[3][0]*view.m[i][0]+view.m[3][1]*view.m[i][1]+view.m[3][2]*view.m[i][2]);
+        if(first_person::clamp_eye(o,worldScale.load()))
+            for(int j=0;j<3;j++) view.m[3][j]=-(o[0]*view.m[0][j]+o[1]*view.m[1][j]+o[2]*view.m[2][j]);
+    }
+    {   // FLAREROLL: this eye's tilt, as an angle in its picture (pixels, y down).
+        // HEADROLL (JJ 2026-10-27 night: the streak "is no longer rotating when I roll my head ... but it is rotating when I look left
+        // and right"): measured against the GAME world's horizon, a pitched game camera made a sideways look count as a tilt (yawing
+        // about a tilted axis rolls the view against that horizon). Only the headset's own tilt against real-world level counts now.
+        const auto& q=eyes[e];
+        auto rot=[&](float vx,float vy,float vz,float o[3]){ // v + 2 q x (q x v + w v)
+            const float tx=q.qy*vz-q.qz*vy+q.qw*vx, ty=q.qz*vx-q.qx*vz+q.qw*vy, tz=q.qx*vy-q.qy*vx+q.qw*vz;
+            o[0]=vx+2*(q.qy*tz-q.qz*ty); o[1]=vy+2*(q.qz*tx-q.qx*tz); o[2]=vz+2*(q.qx*ty-q.qy*tx);
+        };
+        float r[3],u[3],f[3]; rot(1,0,0,r); rot(0,1,0,u); rot(0,0,-1,f); // OpenXR: right +X, up +Y, forward -Z
+        float a=0.0f;
+        float h[3]={-f[2],0.0f,f[0]}; const float l=std::sqrt(h[0]*h[0]+h[2]*h[2]); // level, across the look
+        if(l>0.05f && std::isfinite(l)) {
+            h[0]/=l; h[2]/=l;
+            float hr=h[0]*r[0]+h[2]*r[2], hu=h[0]*u[0]+h[2]*u[2];
+            if(hr<0) { hr=-hr; hu=-hu; }
+            a=std::atan2(-hu,hr);
+        }
+        // LEVELWORLD: the game world's horizon in this view against the game camera's own (FLARESPRITE's first angle, JJ: roll fixed)
+        auto horizon=[](const M4& v){
+            const float fw[3]={v.m[0][2],v.m[1][2],v.m[2][2]};
+            float hh[3]={fw[1],-fw[0],0.0f}; const float hl=std::sqrt(hh[0]*hh[0]+hh[1]*hh[1]);
+            if(hl<0.05f) return 0.0f;
+            hh[0]/=hl; hh[1]/=hl;
+            float hr=hh[0]*v.m[0][0]+hh[1]*v.m[1][0], hu=hh[0]*v.m[0][1]+hh[1]*v.m[1][1];
+            if(hr<0) { hr=-hr; hu=-hu; }
+            return std::atan2(-hu,hr);
+        };
+        float w=horizon(view)-horizon(base);
+        if(w>3.14159265f) w-=6.2831853f; else if(w<-3.14159265f) w+=6.2831853f;
+        flare_roll::set_eye_angles(eyeSign,w,a);
+    }
+    {   // FLIPWATCH (JJ 2026-10-26, pause / main menu "black flashes": EYEBURST 23:56 caught single stereo pairs looking DOWN at
+        // Batman from above while the neighbours looked UP): the game camera's, the head's and the final view's pitch per eye;
+        // a jump of more than 25 deg from that eye's previous render is logged with both frames' values.
+        // FLIPWATCH2 (LIVE 00:09:06 / 00:12:25: only the GAME camera jumps - 79.7 / -71.4 / 70.1 ... - for ~1.5 s after the pause
+        // menu closes, sometimes two views in one generation): also the yaw, the camera position, how many eye views this draw
+        // root / generation made, and the identities that could tell the game's views apart (draw root object, view family = a1,
+        // view state = a2, the view being built), so the real gameplay view can be told from the extra ones.
+        auto pitchOf=[](const M4& m){ return std::asin(std::clamp(m.m[2][2],-1.f,1.f))*57.29578f; }; // forward = column 2, z up
+        auto yawOf=[](const M4& m){ return std::atan2(m.m[1][2],m.m[0][2])*57.29578f; };
+        const auto& q=eyes[e];
+        const float headPitch=std::asin(std::clamp(2*(q.qx*q.qw-q.qy*q.qz),-1.f,1.f))*57.29578f;
+        const float basePitch=pitchOf(base),viewPitch=pitchOf(view),baseYaw=yawOf(base);
+        float pos[3];
+        for(int i=0;i<3;i++) pos[i]=-(base.m[3][0]*base.m[i][0]+base.m[3][1]*base.m[i][1]+base.m[3][2]*base.m[i][2]);
+        static float prev[2][4]{}, prevPos[2][3]{}; static W prevGen[2]{}; static bool have[2]{}; static unsigned logged=0;
+        static W genNow=0; static unsigned viewsThisGen=0;
+        if(poseGen!=genNow) { genNow=poseGen; viewsThisGen=0; }
+        ++viewsThisGen;
+        float dyaw=std::fabs(baseYaw-prev[e][3]); if(dyaw>180) dyaw=360-dyaw;
+        const float dpos=std::sqrt((pos[0]-prevPos[e][0])*(pos[0]-prevPos[e][0])+(pos[1]-prevPos[e][1])*(pos[1]-prevPos[e][1])+
+                                   (pos[2]-prevPos[e][2])*(pos[2]-prevPos[e][2]));
+        if(have[e] && logged<300 && (std::fabs(viewPitch-prev[e][2])>25 || std::fabs(basePitch-prev[e][0])>25 ||
+                                     std::fabs(headPitch-prev[e][1])>25 || dyaw>25 || dpos>150 || viewsThisGen>2)) {
+            ++logged;
+            BVR_LOG("[bo] FLIPWATCH eye %c gen %u (prev %u) view %u of this gen: game camera pitch %.1f (was %.1f) yaw %.1f (was %.1f) "
+                    "pos %.0f/%.0f/%.0f (moved %.0f), head pitch %.1f, view pitch %.1f | root %p family %08X state %08X view %p draws %u%s",
+                    e ? 'R' : 'L',poseGen,prevGen[e],viewsThisGen,basePitch,prev[e][0],baseYaw,prev[e][3],pos[0],pos[1],pos[2],dpos,
+                    headPitch,viewPitch,viewportNow,a1,a2,self,draws.load(),menu_state::menu_open() ? ", menu open" : "");
+        }
+        prev[e][0]=basePitch; prev[e][1]=headPitch; prev[e][2]=viewPitch; prev[e][3]=baseYaw;
+        for(int i=0;i<3;i++) prevPos[e][i]=pos[i];
+        prevGen[e]=poseGen; have[e]=true;
+    }
     M4 proj=lens(projection,e),unjittered=proj;
     unsigned w=backW.load(),h=backH.load();
     if(!w || !h) return ctorOriginal(self,edx,P28(a14,a15));
     a10=bits(0); a11=bits(0); a12=bits(float(w)); a13=bits(float(h));
+    {   // FACEGAME: this eye's lens + the game camera's right / up in this eye's view space (streak cards face the game camera)
+        const float lensT[4]={proj.m[0][0],proj.m[1][1],proj.m[2][0],proj.m[2][1]};
+        float gr[3],gu[3];
+        for(int a=0;a<3;a++) {
+            gr[a]=base.m[0][0]*view.m[0][a]+base.m[1][0]*view.m[1][a]+base.m[2][0]*view.m[2][a];
+            gu[a]=base.m[0][1]*view.m[0][a]+base.m[1][1]*view.m[1][a]+base.m[2][1]*view.m[2][a];
+        }
+        flare_roll::set_eye_face(eyeSign,lensT,gr,gu);
+    }
+    {   // AIMDEPTH: where this eye's centre ray lands in its picture, the lens' depth terms, the eye's world origin + forward
+        const float px=(proj.m[2][0]+1)*0.5f*float(w),py=(1-proj.m[2][1])*0.5f*float(h);
+        float o[3],f[3];
+        for(int i=0;i<3;i++) { o[i]=-(view.m[3][0]*view.m[i][0]+view.m[3][1]*view.m[i][1]+view.m[3][2]*view.m[i][2]); f[i]=view.m[i][2]; }
+        aim_depth::set_eye(eyeSign,px,py,proj.m[2][2],proj.m[3][2],o,f);
+    }
     float jx=0,jy=0;
     if(dlss_bridge::jitter(draws.load() >> (afwFrame ? 1 : 0),w,h,&jx,&jy)) {
         proj.m[2][0]+=2*jx/w; proj.m[2][1]-=2*jy/h;
@@ -391,21 +544,25 @@ void settings_save() {
     put(path,L"hud",L"distance",d); put(path,L"hud",L"width",w); put(path,L"hud",L"height",u);
     // RELEASE 0.1.0 (City panel): the settings City's drawers offer, saved the same way.
     put_int(path,L"hud",L"on_head",vr::hud_head_locked() ? 1 : 0);
+    put_int(path,L"hud",L"on_head_aiming",hudAim.load() ? 1 : 0);
     float md=0,mw=0; vr::get_hud_menu_quad(&md,&mw);
     put(path,L"hud",L"menu_distance",md); put(path,L"hud",L"menu_width",mw);
     float sd=0,sw=0; vr::get_screen_quad(&sd,&sw);
     put(path,L"screens",L"distance",sd); put(path,L"screens",L"width",sw);
+    put(path,L"screens",L"entry_hold_s",entryHoldS.load());
     float pw=0,pd=0; vr::get_panel_size(&pw,&pd);
     put(path,L"screens",L"panel_width",pw); put(path,L"screens",L"panel_distance",pd);
     put_int(path,L"stereo",L"afw",afw::on() ? 1 : 0); put_int(path,L"stereo",L"afw_mode",afw::mode());
 }
 void settings_load_panel(const wchar_t* path) {
     vr::set_hud_head_locked(GetPrivateProfileIntW(L"hud",L"on_head",vr::hud_head_locked() ? 1 : 0,path)!=0);
+    hudAim.store(GetPrivateProfileIntW(L"hud",L"on_head_aiming",1,path)!=0);
     float md=0,mw=0; vr::get_hud_menu_quad(&md,&mw);
     md=get(path,L"hud",L"menu_distance",md); mw=get(path,L"hud",L"menu_width",mw);
     if(md>=.5f && md<=10 && mw>=.5f && mw<=10) vr::set_hud_menu_quad(md,mw);
     float sd=0,sw=0; vr::get_screen_quad(&sd,&sw);
     sd=get(path,L"screens",L"distance",sd); sw=get(path,L"screens",L"width",sw);
+    { const float eh=get(path,L"screens",L"entry_hold_s",2.5f); if(eh>=0 && eh<=6) entryHoldS.store(eh); }
     if(sd>=.5f && sd<=10 && sw>=.5f && sw<=10) vr::set_screen_quad(sd,sw);
     float pw=0,pd=0; vr::get_panel_size(&pw,&pd);
     pw=get(path,L"screens",L"panel_width",pw); pd=get(path,L"screens",L"panel_distance",pd);
@@ -415,6 +572,63 @@ void settings_load_panel(const wchar_t* path) {
     char a[16]{}; WideCharToMultiByte(CP_ACP,0,v,-1,a,16,nullptr,nullptr); afw::settings_read("afw",a);
     swprintf_s(v,L"%d",GetPrivateProfileIntW(L"stereo",L"afw_mode",afw::mode(),path));
     WideCharToMultiByte(CP_ACP,0,v,-1,a,16,nullptr,nullptr); afw::settings_read("afw_mode",a);
+}
+// PAUSEDIRT (JJ 2026-10-26: "there is a dirt layer HUD element that's stuck to your face that should probably be removed from the
+// pause menu"): City's grime pass (batman_city room_overlay.cpp on_pause_dirt: full-screen Draw(3), t0 4x4, t1 the fp16 scene copy
+// >= 1000 wide, t2 a square dirt picture >= 512) is redrawn with plain white in place of the dirt (the pass multiplies by it, so
+// white = no grime). Origins' pass is not yet proven to match: while a pause-type menu (pause or main menu chain) is up, each
+// distinct full-screen draw's pictures are logged once ("[bo] PAUSEDIRT census"). `bo pausedirt on|off` (on = removed).
+ID3D11ShaderResourceView* whiteSrv=nullptr;
+bool ensure_white(ID3D11DeviceContext* ctx) {
+    if(whiteSrv) return true;
+    ID3D11Device* dev=nullptr; ctx->GetDevice(&dev); if(!dev) return false;
+    uint32_t px[16]; for(auto& p:px) p=0xFFFFFFFFu;
+    D3D11_TEXTURE2D_DESC d{}; d.Width=d.Height=4; d.MipLevels=d.ArraySize=1; d.Format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    d.SampleDesc.Count=1; d.Usage=D3D11_USAGE_IMMUTABLE; d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA init{px,16,0}; ID3D11Texture2D* t=nullptr;
+    const bool ok=SUCCEEDED(dev->CreateTexture2D(&d,&init,&t)) && SUCCEEDED(dev->CreateShaderResourceView(t,nullptr,&whiteSrv));
+    if(t) t->Release(); dev->Release(); return ok;
+}
+bool tex_desc(ID3D11ShaderResourceView* v,D3D11_TEXTURE2D_DESC* d) {
+    if(!v) return false;
+    ID3D11Resource* r=nullptr; v->GetResource(&r); if(!r) return false;
+    ID3D11Texture2D* t=nullptr; const bool ok=SUCCEEDED(r->QueryInterface(IID_PPV_ARGS(&t)));
+    if(ok) { t->GetDesc(d); t->Release(); }
+    r->Release(); return ok;
+}
+bool pause_draw_skip(ID3D11DeviceContext* ctx,unsigned vertexCount) {
+    if(flare_roll::before_draw(ctx,vertexCount)) return true; // FLAREROLL: flare pieces drawn level (dropped only by its TESTS hide switch)
+    aim_depth::before_draw(ctx,vertexCount); // AIMDEPTH: at the tone-map step (never drops the draw)
+    if(vertexCount!=3 || !menu_state::menu_open() || menu_state::screen_menu_open()) return false;
+    ID3D11ShaderResourceView* srvs[4]{}; ctx->PSGetShaderResources(0,4,srvs);
+    D3D11_TEXTURE2D_DESC t[4]{}; bool has[4]{};
+    for(int i=0;i<4;++i) has[i]=tex_desc(srvs[i],&t[i]);
+    {   // census: one line per distinct picture set (bounded)
+        static uint64_t seen[48]{}; static unsigned nSeen=0;
+        uint64_t h=1469598103934665603ull;
+        for(int i=0;i<4;++i) { const uint64_t k=has[i] ? (uint64_t(t[i].Width)<<40)^(uint64_t(t[i].Height)<<16)^t[i].Format : 0; h=(h^k)*1099511628211ull; }
+        bool known=false; for(unsigned i=0;i<nSeen;++i) if(seen[i]==h) known=true;
+        if(!known && nSeen<48) {
+            seen[nSeen++]=h; char s[4][40]{};
+            for(int i=0;i<4;++i) if(has[i]) snprintf(s[i],sizeof s[i],"%ux%u fmt %d",t[i].Width,t[i].Height,int(t[i].Format)); else strcpy_s(s[i],"-");
+            BVR_LOG("[bo] PAUSEDIRT census (%s menu): full-screen draw t0 %s | t1 %s | t2 %s | t3 %s",
+                    menu_state::screen_menu_open() ? "screen" : "pause-type",s[0],s[1],s[2],s[3]);
+        }
+    }
+    // LIVE 23:55:26 census: Origins' pass = t0 4x4 | t1 1328x1424 fmt 10 (fp16 scene) | t2 256x256 fmt 72 (BC1 sRGB dirt), so
+    // City's >= 512 dirt rule missed it; >= 128 square keeps the 4x4 + fp16-scene shape as the real discriminator.
+    const bool match=has[0] && has[1] && has[2] && t[0].Width==4 && t[0].Height==4 && t[1].Width>=1000 &&
+                     t[1].Format==DXGI_FORMAT_R16G16B16A16_FLOAT && t[2].Width>=128 && t[2].Width==t[2].Height;
+    bool handled=false;
+    if(match) {
+        if(pauseDirtMatches.fetch_add(1)==0) BVR_LOG("[bo] PAUSEDIRT: the pause grime pass found (dirt %ux%u fmt %d), %s",t[2].Width,t[2].Height,int(t[2].Format),pauseDirtRemove.load() ? "drawn with white = no dirt" : "left as is (switch off)");
+        if(pauseDirtRemove.load() && ensure_white(ctx)) {
+            ctx->PSSetShaderResources(2,1,&whiteSrv); ctx->Draw(3,0); ctx->PSSetShaderResources(2,1,&srvs[2]);
+            handled=true; pauseDirtRemoved.fetch_add(1,std::memory_order_relaxed);
+        }
+    }
+    for(auto* s:srvs) if(s) s->Release();
+    return handled;
 }
 }
 // RELEASE 0.1.0: the MENUTEST / MAPTRACE / MAPTEST2 timed test threads are removed (MAPTRACE and MAPTEST2 switched MAPBLIT /
@@ -447,6 +661,11 @@ bool install() {
         BVR_LOG("[bo] engine hook batch failed; screen only"); return false;
     }
     installed.store(true);
+    frame_inspector::set_draw_skip(&pause_draw_skip); // PAUSEDIRT
+    frame_inspector::set_copy_tap(&flare_roll::on_copy); // FLAREROLL: copies of level pictures stay level
+    frame_inspector::set_draw_after(&flare_roll::after_draw); // FLAREROLL DEPTHOFF: a detached depth buffer goes back
+    frame_inspector::set_draw_indexed_hook(&flare_roll::before_draw_indexed); // PIECECENSUS: indexed glow draws
+    frame_inspector::set_draw_indexed_after(&flare_roll::after_draw);
     reflect::install(imageBase); // optional: its own guard; a mismatch leaves stereo unaffected
     menu_state::install();       // MENUSTATE probe: the game's own menu calls, logged by name
     // LIVE 2026-10-11: this Origins root caller produced thousands of native
@@ -458,7 +677,8 @@ bool install() {
     // City-specific wipe/fade classifiers are NOT Origins evidence; keep them off.
     gfx_hud::set_hide_wipes(false); gfx_hud::set_open_fade(false); gfx_hud::set_load_hold(false);
     gfx_hud::set_replay_enabled(false); gfx_hud::set_black_fill(false); gfx_hud::set_stage_box(false);
-    gfx_hud::set_fade_hold(0); gfx_hud::set_wipe_panel_off(false); gfx_hud::set_menu_fade_black(false);
+    // FADEHOLD on (2026-10-26, JJ's black square after loads; `bo fadehold 0|1`); the other City wipe/fade rules stay off.
+    gfx_hud::set_fade_hold(1); gfx_hud::set_wipe_panel_off(false); gfx_hud::set_menu_fade_black(false);
     gfx_hud::set_hud_zones_on(false);
     vr::set_hud_texture_provider(&gfx_hud::texture);
     vr::set_hud_eyes(2); vr::set_screen_room(true);
@@ -482,6 +702,8 @@ bool install() {
     GetPrivateProfileStringW(L"launch",L"resolution_scale",L"1",text,64,settings);
     resolutionScale.store(float(std::clamp(wcstod(text,nullptr),.6,1.8)));
     settings_load_panel(settings);
+    flare_roll::install(); // FLARESPRITE: note every vertex shader the game creates (before its device exists)
+    flare_roll::settings_load(settings);
     first_person::install(imageBase,settings);
     const wchar_t* cmd=GetCommandLineW();
     auto* outputX=wcsstr(cmd,L"-BOOutputX="); auto* outputY=wcsstr(cmd,L"-BOOutputY=");
@@ -513,6 +735,45 @@ void set_stereo(bool on) {
 }
 void on_present(IDXGISwapChain* sc) {
     startup::tick();
+    {   // LOADBURST (JJ 2026-10-26: "when first entering gameplay from the load screen, a black square appears in the field of view"):
+        // once per launch, the first time the game draws a 3D scene again after >= 3 s without one (a load / its video), record
+        // ~8 s of both eyes + the HUD sheet (EYEBURST, ~400 MB). `bo loadburst on|off`.
+        static bool wasWorld=true; static ULONGLONG worldOffSince=0;
+        const bool world=hud::world_pass(); const ULONGLONG now=GetTickCount64();
+        if(!world && wasWorld) worldOffSince=now;
+        // FADEMID (LIVE 19:24:03-06: the load into gameplay was 2967 ms without a 3D scene - just under the old 3 s, no fade watch)
+        if(world && !wasWorld && worldOffSince && now-worldOffSince>=1500) {
+            // FADEHOLD (City BATMAN_CITY_PLAN "FADEHOLD", JJ 2026-10-26 Origins: "when first entering gameplay from the load screen,
+            // a black square appears in the field of view"; LOADBURST 00:18:03: not in the eye pictures = on the HUD panel): the
+            // game's fade-in from black on the HUD stage. gfx_hud holds the panel back while 5 probe points are dark + covered.
+            gfx_hud::note_movie_ended();
+            // ENTRYHOLD (JJ 2026-10-27: "when entering gameplay, hold the loading screen for another 2 or 3 seconds to avoid showing
+            // game elements loading in"): only after a real loading screen (the game's own full-screen movie flag was TRUE during the
+            // gap - not after the map or a menu), the eyes stay black and the HUD hidden for the set time.
+            const ULONGLONG mv=menu_state::movie_seen_at(); const float hs=entryHoldS.load();
+            if(hs>0.05f && mv && mv+1000>=worldOffSince) {
+                transitions::hold_black(unsigned(hs*1000)); gfx_hud::hold_panel(unsigned(hs*1000));
+                BVR_LOG("[bo] ENTRYHOLD: after a loading screen - black for %.1f s while the world loads in",hs);
+            }
+            BVR_LOG("[bo] 3D scene back after %llu ms without one (load / video ended)%s",now-worldOffSince,
+                    gfx_hud::fade_hold() ? " - fade-in box watch for 3 s" : "");
+            if(loadBurst.exchange(false)) {
+                vr::eye_burst::start(900);
+                BVR_LOG("[bo] LOADBURST: recording both eyes + HUD sheet (900 presents)");
+            }
+        }
+        wasWorld=world;
+    }
+    if(const ULONGLONG t0=streakTestAt.load()) { // STREAKTEST: dumps at 6 s (head level) and 18 s (head tilted), each with the head's roll
+        static ULONGLONG s_run=0; static int s_step=0;
+        if(s_run!=t0) { s_run=t0; s_step=0; }
+        const ULONGLONG el=GetTickCount64()-t0;
+        auto roll=[]{ vr::StereoPose p{}; if(!vr::get_stereo_pose(p)) return 999.0f;
+                      const auto& q=p.head; return std::atan2(2*(q.qx*q.qy+q.qw*q.qz),1-2*(q.qx*q.qx+q.qz*q.qz))*57.29578f; };
+        if(s_step==0 && el>=6000) { s_step=1; BVR_LOG("[bo] STREAKTEST dump 1 (head level): head roll %.1f deg",roll()); frame_inspector::arm(3,2); }
+        else if(s_step==1 && el>=18000) { s_step=2; BVR_LOG("[bo] STREAKTEST dump 2 (head tilted): head roll %.1f deg",roll()); frame_inspector::arm(3,2); }
+        else if(s_step==2 && el>=26000) { s_step=3; streakTestAt.store(0); BVR_LOG("[bo] STREAKTEST done"); }
+    }
     DXGI_SWAP_CHAIN_DESC d{}; if(SUCCEEDED(sc->GetDesc(&d))) { backW.store(d.BufferDesc.Width); backH.store(d.BufferDesc.Height); }
     if(!captureRequested.exchange(false)) return;
     wchar_t folder[MAX_PATH]{},parent[MAX_PATH]{};
@@ -536,6 +797,15 @@ bool handle_command(const char* args) {
         if(known) { gameplayCaller.store(next); set_camera(camera.load()); BVR_LOG("[bo] explicitly selected caller RVA %08X",next); }
         else BVR_LOG("[bo] caller rejected: no live root observation for RVA %08X",next);
     }
+    else if(!strncmp(args,"flareroll ",10)) { if(!flare_roll::command(args+10)) BVR_LOG("[bo] usage: bo flareroll on|off"); }
+    else if(!strcmp(args,"fadehold 1")) gfx_hud::set_fade_hold(1);
+    else if(!strcmp(args,"fadehold 0")) gfx_hud::set_fade_hold(0);
+    else if(!strcmp(args,"camhold on")) { camHold.store(true); BVR_LOG("[bo] CAMHOLD on"); }
+    else if(!strcmp(args,"camhold off")) { camHold.store(false); BVR_LOG("[bo] CAMHOLD off"); }
+    else if(!strcmp(args,"loadburst on")) { loadBurst.store(true); BVR_LOG("[bo] LOADBURST armed for the next load"); }
+    else if(!strcmp(args,"loadburst off")) loadBurst.store(false);
+    else if(!strcmp(args,"pausedirt on")) { pauseDirtRemove.store(true); BVR_LOG("[bo] PAUSEDIRT: pause dirt removed"); }
+    else if(!strcmp(args,"pausedirt off")) { pauseDirtRemove.store(false); BVR_LOG("[bo] PAUSEDIRT: pause dirt shown (game's own)"); }
     else if(!strcmp(args,"stereo on")) set_stereo(true);
     else if(!strcmp(args,"stereo off")) set_stereo(false);
     else if(!strcmp(args,"cam on")) set_camera(true);
@@ -621,13 +891,20 @@ void draw_ui() {
     }
     ImGui::SetNextItemOpen(false,ImGuiCond_Once);
     if(ImGui::CollapsingHeader("VIEW")) {
+        first_person::draw_camera_ui(); // CAMPOS (AKVR "camera position")
         float scale=worldScale.load();
         if(overlay::SliderStep("world scale  (higher = the world looks smaller)",&scale,40,160,"%.0f")) { worldScale.store(scale); settings_save(); }
     }
+    // PANELTIDY (JJ 2026-10-27: "Remove the unnecessary things from the VR panel, including the lens flare stuff"): the lens-flare cards
+    // always face the game camera (FLATCARDS / FACEGAME, JJ "Finally, it's fixed") - no drawer; `bo flareroll on|off` remains.
     ImGui::SetNextItemOpen(false,ImGuiCond_Once);
     if(ImGui::CollapsingHeader("HUD")) {
         bool hh=vr::hud_head_locked();
         if(ImGui::Checkbox("attach UI to head movement",&hh)) { vr::set_hud_head_locked(hh); settings_save(); }
+        if(!hh) {
+            bool ha=hudAim.load();
+            if(ImGui::Checkbox("   HUD follows your head while you hold the left trigger (aiming)",&ha)) { hudAim.store(ha); settings_save(); }
+        }
         // City's HUDDIST controls: the panel is set by its distance and the angle it covers, so moving it nearer or further
         // keeps its size in view (width = 2 x distance x tan(angle / 2)); the height offset scales with the distance too.
         float q[3]; vr::get_hud_quad(&q[0],&q[1],&q[2]);
@@ -651,6 +928,8 @@ void draw_ui() {
     ImGui::SetNextItemOpen(false,ImGuiCond_Once);
     if(ImGui::CollapsingHeader("MENUS AND SCREENS")) {
         transitions::draw_ui();
+        float eh=entryHoldS.load();
+        if(overlay::SliderStep("black after a loading screen (s) - hides the world loading in",&eh,0.0f,6.0f,"%.1f")) { entryHoldS.store(eh); settings_save(); }
         float d=0,w=0; vr::get_screen_quad(&d,&w);
         bool ch=overlay::SliderStep("movie / loading screen distance (m)",&d,0.8f,6.0f,"%.2f");
         ch|=overlay::SliderStep("movie / loading screen size (m)",&w,0.8f,6.0f,"%.2f");

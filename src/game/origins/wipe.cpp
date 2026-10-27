@@ -67,7 +67,10 @@ Step Playback::tick(uint64_t now,bool projection,unsigned duration) {
     if(phase==Phase::Hold) {
         // Actual projection verdict owns return from a loading/cinematic
         // screen. A bounded settle also supports a menu which stays 3D.
-        if(projection && now-start>=duration+350 && now-projectionSince>=350) {
+        // BATSFLOW (JJ 2026-10-26, end of the fast-travel video: bats "then faded to black and then bats played again ... not
+        // very clean"): the 350 ms settle counts from when the picture came back, not from the end of the cover, so a picture
+        // that is already steady when the bats finish covering is revealed at once - one bats-in / bats-out, no black pause.
+        if(projection && now-start>=duration && now-projectionSince>=350) {
             phase=Phase::Reveal;start=now;blackPending=false;return {Visual::Black};
         }
         if(now-holdStart>=60000) {phase=Phase::Idle;return {};}

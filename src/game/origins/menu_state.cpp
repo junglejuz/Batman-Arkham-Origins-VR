@@ -244,7 +244,11 @@ void menu_track(int i, const void* self) { // under g_lock
     }
 }
 
+std::atomic<unsigned long long> g_movieAt{0}; // ENTRYHOLD (kept apart from the 800-line log limit)
 void note(int i, void* self, void* result) {
+    if (g_t[i].kind == kGetBool && result && !strcmp(g_t[i].fn, "IsPlayingFullScreenMovie") && ps::is_memory_valid(result, 4) &&
+        *static_cast<const uint32_t*>(result))
+        g_movieAt.store(GetTickCount64(), std::memory_order_relaxed);
     Target& t = g_t[i];
     const uint32_t n = t.calls.fetch_add(1, std::memory_order_relaxed) + 1;
     if (t.kind == kCall && (i == kStart || i == kClose || i == kSetFocus || i == kRestoreMenu)) {
@@ -715,5 +719,7 @@ void dump() {
         BVR_LOG(PFX " MENUSTATE   %s.%s: %s, %u calls", t.cls, t.fn, t.impl ? "hooked" : "not hooked",
                 t.calls.load(std::memory_order_relaxed));
 }
+
+unsigned long long movie_seen_at() { return g_movieAt.load(std::memory_order_relaxed); }
 
 } // namespace bvr::bo::menu_state

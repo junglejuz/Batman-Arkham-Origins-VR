@@ -24,7 +24,11 @@ behind when the camera swings. Made the same way as [Batman City VR](https://git
 - **Menus, the map and loading screens** on screens in the room, with full-view bat transitions.
 - **Puddle reflections drawn for each eye**, so wet streets look right in both eyes.
 - **First person, if you want it**: tick FIRST PERSON in the VR menu, or click both thumbsticks twice quickly. The
-  camera sits at Batman's eyes and follows his head; it switches back by itself in menus, the map and movies, and whenever the game moves its camera away from him.
+  camera sits at Batman's eyes and follows his head; it switches back by itself in menus, the map and movies, and whenever the game moves its camera away from him. Leaning back stops just in front of his face.
+- **Aim with your head**: hold the left trigger and the batclaw and other gadgets go where you look, in first and third
+  person. The HUD and its reticle follow your head while you aim, and the aim allows for how far away the target is.
+- **Lens flares that stay put**: the light streaks face the game camera, so they no longer turn when you move your head.
+- **No pop-in after loading**: the view stays black for a moment after a loading screen, then fades into the game.
 - **An in-headset VR menu**: hold both thumbsticks down (or press F10). World scale, HUD size and distance, render
   size, DLSS, and more. Settings are saved.
 
@@ -62,6 +66,7 @@ starting the game from Steam still plays the normal flat game.
 | Recenter | hold the headset's menu / Meta button, or F12 |
 | Skip the opening logos | any face button, Start or Back |
 | First person on / off | the VR menu's FIRST PERSON, or click both thumbsticks twice quickly |
+| Aim with your head | hold the left trigger and look at the target |
 | Save a picture of both eyes | the VR menu's capture button, or F2 |
 
 ## If something is wrong

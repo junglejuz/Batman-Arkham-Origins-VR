@@ -1,3 +1,642 @@
+## RELEASE 0.1.5 (2026-10-27 night, JJ: "Remove the unnecessary things from the VR panel, including the lens flare stuff deploy to GitHub
+## and update the release notes")
+
+Panel tidy (PANELTIDY): LENS FLARES drawer removed (FLATCARDS / FACEGAME always on; `bo flareroll on|off` kept), TESTS drawer loses the
+Aim finder and Streak test buttons; AIMWATCH (5 s debug-register watch at the first aim) off by default (settings aim_watch=1 to use).
+Version 0.1.5 (CMake, package). Release build in build/ (Win32), 4/4 offline checks pass. Package: make_package.py now drops the old
+[glow] section and the superseded level_world key from the shipped settings. Contents since 0.1.4: head aim in first and third person
+(AIMSTATE / AIMDEPTH / AIM3P / HUDAIM2), lens-flare cards facing the game camera (FLATCARDS / FACEGAME), LEANBACK, ENTRYHOLD +
+ENTRYFADE, FADEMID, LOOKFWD, CAMPOS, FASTTRAVEL, STEREOPOSE, CAMHOLD, lens flares back on (LENSFLAREOFF undone). HEADSET (JJ): head
+aim, FACEGAME, ENTRYHOLD; LEANBACK / AIM3P / ENTRYFADE built, not yet confirmed in the headset at release time.
+
+## LEANBACK (2026-10-27 night)
+
+JJ: "When in first person mode and I move my physical head back my virtual camera is moving through Batman's head". The headset's own
+movement (scene.cpp delta(eyes)) is added on top of the eye point 25 cm in front of his face; leaning back 25 cm reaches his head.
+SOURCE (built, 4/4 checks, installed; previous in backups/pre-LEANBACK-2026-10-27): first_person::clamp_eye - after each eye's final view
+is built, in first person its origin may come no nearer than "closest to his face when you lean back" (default 15 cm, never more than
+"camera in front of his face") to his head point along the pair's level look; only that component is limited (sideways / up / down free;
+both eyes get the same shift = stereo kept). settings [first_person] lean_min_cm.
+
+## AIM3P - head aim in third person (2026-10-27 night)
+
+JJ: "Finally, it's fixed [FLATCARDS - the streak]. Now can you make the head aiming work in third person the same way it does with first
+person?" HEADSET 20:2x: FLATCARDS confirmed by JJ.
+SOURCE (built, 4/4 checks, installed, dll sha256 D6FCF811...; previous in backups/pre-AIM3P-2026-10-27): first_person.cpp third-person
+branch (camValid, also entered now when "aim with your head (third person)" is on): while the left trigger is held (always required in
+third person), AIMSTATE steers the controller to body x head (+ AIMDEPTH through the looked-at point, from the game camera's real
+position); since the game camera ORBITS Batman with the controller, each pair is drawn from where it would be for the stick's direction:
+the camera's offset from his eye point in its own (possibly lagging) frame, laid along the body basis, rotation = body basis. After the
+release the same compensation runs until the camera is back within ~0.5 deg of the stick (<= 1.5 s) = no swing back. CAMPOS applied on
+top. Panel (third person, FIRST PERSON unticked): "aim with your head while holding the left trigger (third person)", settings
+[first_person] look_aim_3p (default 1); TESTS counter "third-person head aim pairs".
+Known limit: the orbit pivot is taken as his eye point; if the game's pivot is the shoulder, the view may drift a few cm as the head turns.
+
+## FLATCARDS - 2026-10-27 night, after the 20:08 run
+
+JJ: "Still rotating, what is going on?" LIVE 20:09 census: the additive card batches in this scene are 4-41 cards of a SQUARE 256x256
+BC3 picture (vs 776C74B8, indexed 18-246, some with a 256x256 second picture) - all "not aligned": the thin-picture rule (STREAKCARDS /
+FACEGAME) never matched the streak's draws, so FACEGAME never ran on them. (ENTRYHOLD fired 20:09:25.)
+SOURCE (built, 4/4 checks, installed, dll sha256 58C740C6...; previous in backups/pre-FLATCARDS-2026-10-27): every TEXTURED (picture
+>= 16 px) additive triangle-list batch (multiple of 6, <= 3000 indices) gets the GS, FACEGAME for every aligned piece; in the GS a
+triangle is rebuilt only if it lies flat to the eye's view (corner depth differences <= 5 % of its size + 0.5 UU = a head-facing card)
+and in front - lit meshes / signs pass untouched. Status line now "flare pieces turned N + batches N (...; facing the game camera N)".
+Test: streak near a wall, head left / right / roll -> no turning, no cutting into the wall; TESTS FACEGAME off -> turning back.
+
+## FACEGAME + ENTRYFADE - 2026-10-27 night, after the STREAKCARDS run
+
+JJ: "the black is fine, but it needs to fade into the game rather than just cut into it. Also, the streak is still rotating with head
+movements left and right, and I can guarantee it is rotating around its y-axis because when there's a wall there, the flare streak
+disappears into the wall when it rotates".
+= the streak cards stand IN THE WORLD (depth-tested) facing the head-tracked eye view; turning them in the picture (TEXALIGN /
+STREAKCARDS) can never stop the card turning in depth. JJ's rule (2026-10-27): game elements must face the GAME camera, never the
+head-tracked one (VR_ESSENTIALS §6 MARKERCARD, §3 head-free camera aim).
+SOURCE (built, 4/4 checks; rebuild maths checked numerically - card facing a 30-deg-turned head comes back facing the game camera, same
+centre and size; installed, dll sha256 2EF9D9E1...; previous in backups/pre-FACEGAME-2026-10-27):
+- FACEGAME (flare_roll.cpp GS mode 1, scene.cpp ctor): per eye, the lens terms P00 / P11 / P20 / P21 and the game camera's right / up in
+  this eye's view space; the GS takes each card's corners back into eye view space, finds the card centre (longest-edge midpoint), lays
+  each corner's offset along the eye's right / up onto the game camera's right / up, projects again; each corner keeps its own NDC
+  depth. Applied to the thin-picture card batches (STREAKCARDS); single quads keep the in-picture turn. TESTS switch "streak cards face
+  the game camera, not your head (FACEGAME)", counter "cards turned to the game camera".
+- ENTRYFADE (transitions.cpp): after the ENTRYHOLD black, a black layer over each finished eye image fades out over 1 s (own tiny alpha
+  pipeline, state saved / restored); the HUD panel stays hidden 0.5 s into the fade.
+
+### TEST PLAN FG1 (one launch, JJ drives)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | load into gameplay | ENTRYFADE | black, then a 1 s fade into the game |
+| 2 | streak light near a wall: head left / right / roll | FACEGAME | streak no longer turns or cuts into the wall; TESTS counter > 0 |
+| 3 | TESTS: untick FACEGAME and repeat | A/B | the turning comes back |
+
+## STREAKCARDS + ENTRYHOLD - 2026-10-27 night, after the 19:55 run
+
+JJ: "Okay, I'm done. Did you get it? Also, when entering gameplay, hold the loading screen for another 2 or 3 seconds to avoid showing
+game elements loading in when we first enter the game".
+LIVE 19:55 census (64 distinct additive draws onto the scene, first 64 only): almost all are DrawIndexed meshes with a 4x4 + square
+1024/512/256 picture (lit signs / surfaces, 12-2640 indices); single quads aligned: 2 kinds (6 indices, 1024x1024 + 512x512 BC1);
+THIN pictures only in glow draw 63 (indexed 84 = 14 cards, t0 512x128 BC3, vs 80383CF8) and glow draw 1 (indexed 24 = 4 cards,
+t0 64x256 BC1, vs 7EED2138) = the streak candidates; never touched before (multi-card batches).
+FADEMID 19:55:41: "3D scene back after 3015 ms", "fade-in box seen (whole panel) 16 ms", "gone (panel clear) after 1328 ms".
+SOURCE (built, 4/4 checks, installed, dll sha256 8994D34D...; previous in backups/pre-STREAKCARDS-2026-10-27):
+- STREAKCARDS (flare_roll.cpp piece()): additive triangle-list batches (multiple of 6, <= 1200 indices) whose first picture is >= 3:1
+  are aligned card by card (same GS: each card's centre from its diagonal, its texture axis onto the level). Square-picture meshes
+  never. Census line ends "ALIGNED" for them.
+- ENTRYHOLD: menu_state keeps the time IsPlayingFullScreenMovie last answered TRUE (outside its 800-line log limit); on the world's
+  return after >= 1.5 s, if that movie flag was TRUE during the gap (= a loading screen, not the map), transitions paints every finished
+  eye image black and gfx_hud withholds the HUD panel for the set time (panel MENUS AND SCREENS "black after a loading screen (s)",
+  default 2.5, settings [screens] entry_hold_s). Hard cut at the end (no fade helper). Log "ENTRYHOLD: after a loading screen".
+
+### TEST PLAN SC1 (one launch, JJ drives)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | load into gameplay | ENTRYHOLD | 2.5 s black after the loading screen, no pop-in; log line |
+| 2 | streak light: head left / right / roll | STREAKCARDS | streak level; census line 63 / 1 "ALIGNED" |
+| 3 | TESTS "hide the flare pieces the mod turns" (only if 2 fails) | which draw | streak gone = ours |
+
+## PIECECENSUS - 2026-10-27 night, after the 19:51 run
+
+JJ: "Nope, it's still happening. I actually think it is in fact rotating around its y-axis in order to face the same direction as the
+camera lens". LIVE 19:51: 14006 pieces aligned (one VS, 64x64 sprites), level_world2=1 (JJ ticked the world option), hide test not
+used. A card facing the game camera's direction would still land tilted in the eye picture and our texture alignment would level it =
+the streak is evidently NOT among the aligned 64x64 pieces (lamp glows).
+SOURCE (built, 4/4 checks, installed; previous in backups/pre-PIECECENSUS-2026-10-27): piece() replaces sprite_draw - every distinct
+ADDITIVE draw onto the eye-size HDR scene (Draw <= 1000 vertices, DrawIndexed <= 3000 indices, set_draw_indexed_hook / _after) is
+logged once after ~40 s of play ("[flareroll] glow draw N: draw|indexed count, topology, t0 / t1 size + format, blend, vs, ALIGNED |
+quad, no shader | not a single quad"); single quads drawn indexed (6, list) or as a 6-vertex list are aligned like the strips.
+Next: the census names the streak's draw (expect a wide, thin texture) -> align / re-orient exactly that one.
+
+## ALWAYSALIGN - 2026-10-27 night, after the 19:46 run
+
+JJ: "It only improves it by a couple of degrees it's still rotating" (TEXALIGN2 + LEVELWORLD build).
+LIVE 19:47: flare piece VS outputs = float2 TEXCOORD0 (the texture coordinate) + five float4s - so TEXALIGN's first candidate WAS right.
+Cause (SOURCE): flare_roll only touched anything while the eye's tilt was over 0.2 deg (g_active). With "level with the real room"
+(19:40) and the head level that is never -> TEXALIGN never ran and the game's own world-following turn stayed; with "level with the
+game world" (19:47) it ran but aligned the pieces to that same world tilt -> "a couple of degrees".
+SOURCE (built, 4/4 checks, installed, dll sha256 4BB7023B...; previous in backups/pre-ALWAYSALIGN-2026-10-27): flare pieces aligned in
+EVERY eye picture (g_spritePass), default level = the real room (settings key level_world2, default 0); TESTS "hide the flare pieces
+the mod turns" (drops them; counter) to prove the streak is one of them.
+Test: streak light, head left / right / roll -> level in the view; if not, TESTS hide switch: streak gone = ours, else drawn elsewhere.
+
+## TEXALIGN2 + LEVELWORLD - 2026-10-27 night, after the 19:40 run
+
+JJ: "When I turn my head left, the streak rotates clockwise. When I turn my head right, the streak rotates anticlockwise" (19:40 run,
+TEXALIGN build). LIVE 19:40: FADEMID works - "fade-in box seen (whole panel) 437 ms / 16 ms after the 3D scene came back - panel
+held", "gone (3 s limit / panel clear)"; flare pieces turned 3410, GS built.
+Computed (numpy): game camera pitch +9 deg (FLIPWATCH 19:09 "game camera pitch 9.1"), head 40 deg left -> the game WORLD's horizon
+tilts +5.8 deg clockwise in the view; right -> -5.8 = exactly JJ's directions: the streak stays level with the game world = TEXALIGN
+changed nothing (its first TEXCOORD is evidently not the texture coordinate - constant per piece -> fallback to the head roll alone).
+SOURCE (built, 4/4 checks, sample GS compiled with fxc; install queued until the game exits - the game was running, DLL locked;
+previous in backups/pre-TEXALIGN2-2026-10-27):
+- TEXALIGN2: every float pair of every TEXCOORD output is a candidate; the first that spreads like a texture coordinate over the
+  triangle (0.02 < |det| < 50) gives the texture x axis. Log once per flare VS: "[flareroll] flare piece shader ... outputs: struct V".
+- LEVELWORLD: the target level is the GAME world's horizon (against the game camera's own, FLARESPRITE's first angle) by default;
+  panel LENS FLARES "level with the game world (off = level with the real room)" switches to HEADROLL. settings [lens_flares]
+  level_world.
+
+### TEST PLAN TA2 (one launch, JJ drives)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | streak light: head left / right, roll | TEXALIGN2 + LEVELWORLD | streak stays put against the world |
+| 2 | panel LENS FLARES: untick "level with the game world", repeat | the other reference | JJ picks the one that looks right |
+Follow-up: still turning -> the "outputs" log line names the real texture coordinate (or there is none: the turn is in the PS).
+
+## TEXALIGN + FADEMID - 2026-10-27 night, after the 19:23 run
+
+JJ: "Looking left and right still makes the streak rotate along its Z axis. The grapple batclaw is a lot more accurate now. There is
+still a square in the middle of the field of view when entering gameplay. It could be attached to the HUD element information that
+appears".
+LIVE 19:24: aimdepth reads 2028 (sky 6), last distance 1753 UU = AIMDEPTH working (JJ: "a lot more accurate"). HEADROLL in place: with
+the head level the flare turn is ZERO, so the remaining turn on sideways looks is the GAME's own (its pieces are turned as the light
+crosses the picture). FADEHOLD never armed on the gameplay entry: world pass off 19:24:03.878 -> on 19:24:06.845 = 2967 ms, just under
+the 3 s trigger (the 19:09:47 trigger was the boot / main menu, not gameplay). LOADBURST 19:09 HUD sheet is RGB (no alpha) - a dark
+box on the panel cannot be seen in it.
+SOURCE (built, 4/4 checks, generated GS sample compiled with fxc gs_4_0, alignment maths checked numerically; installed, dll sha256
+DF6B95AE...; previous in backups/pre-TEXALIGN-2026-10-27):
+- TEXALIGN (flare_roll.cpp GS): each flare piece's texture x axis on the picture (d position / d u from the first float2+ TEXCOORD of
+  its three corners) is turned onto the head-level direction (mod 180 deg), about the quad's centre - the piece drawn as authored,
+  level, wherever it is and however the game turned it; no usable texture coordinate = the head-roll turn alone.
+- FADEMID: fade watch armed after >= 1.5 s without a 3D scene (was 3 s); four more probe points around the panel centre - a box over
+  the whole panel (City) OR over its middle (centre + 3 of 4 inner points dark and covered) holds the panel; log "fade-in box seen
+  (whole panel / middle) N ms after ..." then "gone (...)".
+
+### TEST PLAN TA1 (one launch, JJ drives)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | load into gameplay from the main menu | FADEMID | no square; log "3D scene back", "fade-in box seen", "gone" |
+| 2 | look at a streak light, turn the head left / right and roll | TEXALIGN | streak stays level |
+| 3 | look at other glows (lamps, signs) | nothing broken | no oddly turned sprites |
+Follow-ups: 1 "no box within 0.7 s" but JJ still sees it -> the square is not dark / not on the panel centre: panel picture WITH alpha
+(gfx_hud::request_panel_sequence) on the next load; 2 still turning -> the piece's TEXCOORD0 is not its texture coordinate (log a GS
+census of the VS outputs).
+
+## HEADROLL + AIMDEPTH + HUDAIM2 - 2026-10-27 night, after the 19:09 run
+
+JJ: "The anamorphic glow is no longer rotating when I roll my head, which is good, but it is rotating when I look left and right with my
+head. So we're halfway there. The batclaw is still offset from the reticle to up and right of the actual reticle".
+LIVE 19:10: FLARESPRITE works - "flare piece" = 64x64 BC1-sRGB sprites, blend ONE/ONE onto the 1328x1424 fp16 scene, geometry shader
+built (1), 2206 pieces turned in 30 s. AIMPOV wrote both view records ("aim now starts at your eyes") and changed nothing = the game's
+trace does not start from those records. Lens L(l -49.5 r 35.5 u 39.4 d -50.5) R(mirrored): an off-centre-lens cause would point
+right AND DOWN by 11-13 deg - ruled out; "a little up and right" = the over-the-shoulder camera's parallax (+ the HUD's -1.4 deg
+height offset for the "up" part).
+Looked up: Batman City markers.cpp AIMDEPTH / BATMAN_CITY_PLAN AIMDEPTH (depth under the centre ray), VR_ESSENTIALS §6 "Centre aim
+reticles: find their point by ray-marching the depth buffer".
+SOURCE (built, 4/4 checks, installed 2026-10-27 night, dll sha256 767EF057...; previous in backups/pre-AIMDEPTH-2026-10-27):
+- HEADROLL (scene.cpp): the flare tilt is the headset eye's roll against real-world level (OpenXR up), not against the game world's
+  horizon - with the game camera pitched, a sideways look rolled the view against that horizon.
+- AIMDEPTH (new aim_depth.cpp): at the left eye's tone-map step a 1-pixel shader reads the scene depth (gfx_hud::scene_depth) under
+  the eye's centre ray into a 1x1 R32F target -> staging, read one picture later (DO_NOT_WAIT); z = m32 / (d - m22) (the eye's own
+  lens terms); world point = eye origin + forward x z (sky -> far; nearer than 1 m ignored = his arm). AIMSTATE then turns the
+  controller so the GAME camera's ray (this pair's camera position) passes through that point (only if within ~25 deg of the look).
+  AIMPOV removed. Status "aimdepth: reads N (sky, too near) ... last distance"; TESTS "aimed through the looked-at point N".
+- HUDAIM2 (openxr_runtime.cpp): while the HUD rides the head for aiming, it sits exactly on the head's aim (no -0.10 m height).
+
+### TEST PLAN AD1 (one launch, JJ drives)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | look at a streak light, turn the head left / right, then roll | HEADROLL | streak level in both |
+| 2 | hold LT, put the reticle on a near grapple point (5 m) and a far one (20 m+) with the head, fire | AIMDEPTH | lands on the reticle at both distances; status "aimdepth: reads" > 0, distances plausible |
+| 3 | aim at the sky / far away | no point | still fires along the look |
+Follow-ups: "reads 0" -> no tone-map match or no depth (log); lands consistently off by a constant -> the trace starts elsewhere than
+the game camera position (AIMWATCH readers at fire time).
+
+## AIMPOV + FLARESPRITE - 2026-10-27 night, after the 18:04 run
+
+JJ: "The anamorphic glow is still not fixed, it's still rotating along its z-axis when I roll my head. The batclaw launch is now much
+better. It is launching where the head is looking, but it seems to be a little bit above and to the right of the actual reticle."
+LIVE 18:05: AIMSTATE works (head aim active / released lines, body pitch -36). flareroll census (one tilted eye picture): only TWO
+full-screen steps - draw 3 -> 332x356 rgba16f from the scene (real depth write, quarter D24S8) and the tone map reading the scene
+alone; "turned back 0" all run = this game's current frame has no quarter-size streak chain at all (the 2026-10-11 dump's chain is
+gone or elsewhere) -> the chain turn is pointless and is switched off.
+STATIC (framedump_044343): five single-quad Draw(4) strips onto the HDR scene T15 after translucency, each with its own flare
+texture (512x512 / 256x256 BC1 / BC3 + 64x64 + scene copy), caller 0x630DB2 (the translucency drawer) = the lens-flare pieces.
+SOURCE (built, 4/4 checks, installed 2026-10-27 night, dll sha256 FCA6EC95...; previous dll + manifest in backups/pre-FLARESPRITE-2026-10-27):
+- AIMPOV (first_person.cpp): the game aims from ITS camera (over the right shoulder, above / behind his head) along the look we put
+  in the controller - a parallel ray from another place lands above / right of the reticle. After the pair's last eye, the camera's
+  view record(s) (controller +0x370 -> +0x3D8 / +0x41C, found by POVAIM in three launches) get our eye point + the head's look, only
+  while they still equal this pair's game camera (2 UU / 1.5 deg). Log "the game's aim now starts at your eyes"; TESTS line
+  "aim start at your eyes: written / not matching".
+- FLARESPRITE (flare_roll.cpp): CreateVertexShader hooked at start-up (throwaway device, vtable 12; every VS output signature noted,
+  AKVR hudsplit.cpp MKGS method). A non-indexed 4-vertex strip with ADDITIVE blend (dest ONE) onto an eye-size HDR target gets a
+  generated geometry shader that turns each quad about its own centre (the longest edge of each triangle = the quad's diagonal) by
+  the eye's tilt; full-screen quads untouched; unbound right after the draw. Log "[flareroll] flare piece N: ..." (first 16, with
+  inputs and blend) and "CreateVertexShader hooked". Census now waits ~40 s into play. Chain turn kept behind a TESTS checkbox.
+
+### TEST PLAN FS1 (one launch, JJ drives, nothing to press)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | play ~1 min, then look at a streak light and tilt the head | FLARESPRITE | streak stays level; log "flare piece" lines + "flare pieces turned N" > 0 |
+| 2 | hold the left trigger, aim the batclaw at a small grapple point with the head, fire | AIMPOV | lands on the reticle; log "aim now starts at your eyes" |
+| 3 | look around normally (no trigger) | nothing else turned | no other glow / sprite looks wrong |
+Follow-ups: 1 no "flare piece" lines -> the pieces are indexed draws or another shape -> the census lines name them; pieces turned
+but the streak still tilts -> the streak is not a single quad (census) ; 2 "not matching" counts -> the record moved (log).
+
+## AIMSTATE / FLAREROLL DEPTHOFF + CENSUS - 2026-10-27 night, after the 17:53 / 17:54 runs
+
+JJ: "The anamorphic glow is still rotating with my head rolls and the bat claw is still not firing towards where I am looking. It is
+firing in the direction of Batman's body instead of using the head tracking".
+LIVE 17:55: "the controller FEEDS the camera (its view jumped onto the head's look)" = Controller.Rotation is the camera's own STATE
+(classic UE3: the stick turns the controller, the camera and the aiming body follow it); writing the view record only moved the
+reticle. AIMWATCH: 54 readers (controller yaw: exe+0x2F0E3, +0x3237CE, +0x328BDF, +0xAF3278, +0xAF3A47, +0xA1FBD1, +0xA288BB, ...;
+Pawn.Rotation: exe+0xEE994 x6853, +0x95C73E, +0xA21DCD, ...) - kept for the static follow-up if needed.
+LIVE 17:54 / 17:55 flareroll: "steps 0 ... depth-tested steps left 2985 / 6545" = every candidate step had a depth / stencil test and
+was skipped (framedump_044343: the four streak passes write T524 with the quarter D24S8 T457 bound, "T524: 4 / 4" depth-tested).
+SOURCE (built, 4/4 checks, installed 2026-10-27 night, dll sha256 77817B38...; previous dll + manifest in backups/pre-AIMSTATE-2026-10-27):
+- AIMSTATE (first_person.cpp, replaces POVAIM + AIMCTRL; the view-record finder is gone): while the left trigger is held in first
+  person, each pair: body = Controller.Rotation - our last yaw contribution (stick turns kept), body pitch = the pitch when the
+  trigger went down (no drift, Asylum AIMLEVEL), controller = body x head; both eyes render from the body basis (no double head);
+  release writes the body back. Log "head aim active: Batman's controller follows your look" / "head aim released (...)".
+  AIMWATCH now watches Controller / Pawn rotation yaw + pitch.
+- FLAREROLL DEPTHOFF: a quarter-size step with a REAL depth / stencil test (not ALWAYS / KEEP) is turned like the others; its depth
+  buffer is detached for that one draw and put back right after (draw-after hook). Counter renamed "depth-tested steps (depth
+  detached)".
+- FLAREROLL CENSUS: the first eye picture of a launch tilted more than 3 deg logs every full-screen step ("[flareroll]  draw ...":
+  target size / format, CHAIN / quarter, depth + stencil state, real test, the four inputs with "L" for level) - if the streak still
+  tilts, this names the real chain without another test run.
+
+### TEST PLAN AIM3 (one launch, JJ drives, nothing to press)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | first person, look at a light, tilt the head well to one side for a few seconds | FLAREROLL + census | streaks stay level; log "census ... census end", steps / turned counts > 0 |
+| 2 | hold the left trigger, look (head only) at a grapple point, fire the batclaw; a batarang at a thug | AIMSTATE | gadget goes where he looks; Batman turns with the look |
+| 3 | while holding, turn with the stick; release | no jumps | view turns normally; on release the view stays where it was |
+| 4 | pause menu / map while holding | release on menus | log "head aim released (menu ...)" |
+Follow-ups: 2 still straight -> AIMWATCH pawn readers at fire time (static); 1 still tilting -> the census lines show which steps
+draw the streak (format / size / depth) -> one targeted rebuild.
+
+## AIMCTRL + AIMWATCH / FLAREROLL (glow removed, lens flares back) - 2026-10-27 evening, after the 17:35 run
+
+JJ: "Head aiming is now working, but when launching the batclaw or other weapons, it's not launching towards the reticle where the head
+is aiming. It's launching straight ahead. Also, the glow is not working still. I say we remove it and put back the original lens flare
+and fix it so that lens flares do not rotate with head rolls".
+Looked up: memory hw-read-watch-finds-readers (SWBF2 probe.cpp DR watch), ak-lens-flare-is-two-shaders; this file STREAKROLL (the
+planned streak fix: rotate the streak's sampling by the eye's roll); VR_ESSENTIALS §3 (camera-aim shaders / head-free camera).
+LIVE 17:36:23: "view record found at controller +0x370 -> +0x3D8" and "-> +0x41C" (value after it 55.4 = FOV), head aim active,
+no "FEEDS" / "did not rebuild" lines = the POV writes are safe, but gadgets still fly along the stick camera.
+STATIC (framedump_044343, 2026-10-11, lens flares on): after the scene: half (764x820) -> quarter 384x412 R16G16B16A16_UNORM (copied)
+-> three IDENTICAL full-screen passes into 382x410 R16G16B16A16_FLOAT, each copied back and re-read (an iterative streak; same
+constants every pass), a fourth adding another quarter picture, two 2D bloom passes, then the tone-map step reads scene + both quarter
+results + the 256x16 colour table. Shader identities are not in that dump.
+SOURCE (built, 4/4 checks, installed 2026-10-27 evening: dll sha256 E02E04B9..., Graphics-Profile.ps1 B1ABE127...; previous dll,
+script, manifest and JJ's GFXSettings xml in backups/pre-FLAREROLL-2026-10-27):
+- AIMCTRL (first_person.cpp): with the view records, Controller.Rotation (+0x54) gets the head's look too (UE3 fires along
+  GetBaseAimRotation = Controller.Rotation), only while it equals this pair's camera heading; per record the value before our write
+  is put back if not rebuilt; if the view then jumps onto the written look, only the controller is refused ("the controller FEEDS
+  the camera").
+- AIMWATCH: first head-aim write of a launch -> 5 s hardware watch (Dr0-3, read / write, all threads, a helper thread arms and
+  disarms) on view record 1 / 2 yaw, Controller.Rotation yaw, Pawn.Rotation yaw; log "[bo] AIMWATCH <field>: after <eip> (exe+0x..)
+  xN" = the code that reads them while JJ aims and fires. If the gadget still flies straight, the reader near the batclaw fire is
+  the next target (static, no new test). settings.ini [first_person] aim_watch=0 switches it off.
+- GLOW removed (glow.cpp / .h retired to the backup folder; panel drawer gone; [glow] ini section now unused).
+- Lens flares back: Graphics-Profile.ps1 no longer forces LensFlares off (store or engine ini); JJ's GFXSettings store set back to
+  LensFlares true (FIX_CHANGES "FLAREROLL").
+- FLAREROLL (flare_roll.cpp): per eye, the tilt of the eye against the game camera's horizon (scene.cpp ctor, picture angle). In
+  every quarter-size full-screen step (target R16G16B16A16, at most 1/3 of the eye width, no depth / stencil test) each RGBA16 input
+  still in the eye picture is replaced by a copy turned LEVEL; its target (and game copies of it, copy tap) count as level; any
+  other draw reading a level picture (the tone-map step) gets a copy turned back to the eye's tilt. The game's streak is thus drawn
+  horizontal in a level picture. Head level (< 0.2 deg) = nothing touched. Panel LENS FLARES: "keep lens-flare streaks level when
+  you tilt your head" (settings.ini [lens_flares] level, default 1); command "bo flareroll on|off"; status line "flareroll ON:
+  steps N, turned in / back". Known costs: two extra bilinear resamples of the quarter-size bloom / streak (slightly softer),
+  black corners for very large tilts.
+
+### TEST PLAN AIM2 (one launch, JJ drives, nothing to press)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | first person, look at a light, tilt the head left / right | FLAREROLL | streaks stay level with the world; with the panel switch off they tilt again; log steps / turned counts > 0 |
+| 2 | hold the left trigger, look at a grapple point with the head only, fire the batclaw; then a batarang at a thug | AIMCTRL | the gadget goes where he looks; log "+ Controller.Rotation", no "FEEDS" |
+| 3 | (automatic during 2) | AIMWATCH | "[bo] AIMWATCH done ... N distinct instructions" + one line each |
+| 4 | turn the camera with the stick while holding the trigger | no drift | the view turns normally; no jumps |
+Follow-ups: 2 fails -> the AIMWATCH readers that run only around the fire name the aim source (static, Ghidra on the exe) -> write
+there. 1 fails (streak still tilts) -> "steps 0" = detection missed (log status) -> a frame dump names the chain; streaks doubled or
+misplaced -> switch off in the panel, report.
+
+## GLOWEYE / POVAIM / HUDAIM / LOOKFWD (2026-10-27 evening, JJ after the 16:50-16:57 runs)
+
+JJ: "our added glows are only showing in the left eye, and turn on and off as you move your head around. Head aiming in first person
+is still not working. The HUD should move with my head when holding down the left Trigger. Also I should not be able to spin the
+camera around to look directly at batman's face up close while in first person mode". (The TESTS "Aim finder" was not pressed.)
+Looked up: VR_ESSENTIALS §5 (ACOVR P5T: an engine may present a view's picture during the NEXT view's job - tag by the drawn view,
+not by Present) and §2 (anything cached per frame must run per eye); §6 HUD head-locked mode (runtime "attach UI to head");
+AKVR camera.cpp AIMHEAD/AIMTRIGGER (head written into the camera's own final block, left trigger only); memory
+arkham-first-person-asylum-origins, batman-city-first-person (head never hidden in any Arkham mod - the lens sits in front of it).
+Evidence (LIVE, today's log + EYEBURST 16:54):
+- Glow: status "passes 4094 ... fallback 4094" = one glow per PRESENT; the burst's present times alternate ~13 ms / ~2 ms (sign -1
+  long, sign +1 short, 424 of 449) = BOTH eyes are drawn, then both presented. "Once per present" glowed only the first-drawn eye;
+  its red lights are visibly larger than the other eye's (pairs 40/300/600/880); when the timing shifts (25 long gaps for +1) the
+  glow jumps eye = "on and off". Every pass also used the fallback input (the scene leader never matched) but the input never
+  switched, so that is not the cause.
+- Head aim: "Controller.Rotation at +0x54 confirmed", "head aim active" at 16:54:37 and 16:57:04, no effect on gadgets = the
+  controller is a copy of the camera.
+SOURCE (built 4/4, installed 2026-10-27 evening, sha256 20514E41..., old DLL + manifest in backups/pre-POVAIM-2026-10-27):
+- GLOWEYE (glow.cpp): once per eye RENDER - scene.cpp begin_detour (the engine's view-family begin) counts eye passes; the present
+  count only if that hook never ran.
+- POVAIM (first_person.cpp, replaces the controller write + AIMLEVEL body basis): UE3 aims from Camera.CameraCache.POV (Location,
+  Rotation, FOV via GetPlayerViewPoint), rebuilt by the camera every tick. The mod finds it itself: among the controller and up to
+  160 objects it points to, a float3 = the game camera's position (2 UU) followed by a rotator = its yaw / pitch (1.5 deg), on 20
+  checks in a row while the camera moves (a one-frame-old copy fails); log "the camera's view record found at controller +0x.. ->
+  +0x..". While aiming (AIMTRIGGER: left trigger) the head's look (game camera x headset) is written into that rotation AFTER the
+  pair's LAST eye has read it, so the next tick's gadget aim uses it and the camera overwrites it - nothing accumulates, the
+  rendered view is untouched. Guards: written only where the record equals this pair's camera; next pair, if the record still
+  holds our write (not rebuilt) the camera's value goes back before the second eye reads it and the first eye is drawn from the
+  camera's own rotation ("did not rebuild"); if the game camera jumped onto our written look the record feeds the camera -> put
+  back, never written again ("FEEDS the camera"). ~30 s of moving camera without a record -> "no view record found" + up to 6
+  "position seen with other rotations" lines for the next step.
+- HUDAIM (openxr_runtime.cpp + scene.cpp): while the left trigger is held in gameplay (first and third person) the HUD rides the
+  head; on release it returns to its room place. Panel HUD: "HUD follows your head while you hold the left trigger (aiming)",
+  settings.ini [hud] on_head_aiming (default 1).
+- LOOKFWD (first_person.cpp, replaces FACEFWD): the lens sits "camera in front of his face" out from his head along where you LOOK
+  (game camera x headset, level, per pair), so his head is always behind the lens however the stick or your head turns. FACEFWD
+  put it in front of his FACE, so turning the camera round showed his face up close. Note: turning the head now swings the lens
+  round his head at that radius (25 cm); if that feels like orbiting, lower "camera in front of his face".
+
+### TEST PLAN POV1 (one launch, JJ drives, nothing to press for me)
+
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | Load a save, first person on, look at red / bright lights and move the head | GLOWEYE | glow the same in both eyes, steady; log status "passes" ~ 2 per stereo pair |
+| 2 | Walk and turn the camera with the stick for ~10 s | POVAIM finds the record | log "view record found" (or "no view record found" + candidates) |
+| 3 | Hold the left trigger, look (head only) at a grapple point / thug, fire the batclaw / batarang | head aim + HUDAIM | gadget goes where he looks; HUD follows the head while held, returns on release; log "head aim active", no "FEEDS the camera" |
+| 4 | Turn the camera all the way round with the stick, then turn the head behind | LOOKFWD | never his face; no teeth |
+| 5 | Pause menu, map, quit | gates | HUD back in its place in menus; clean exit |
+Follow-ups: 2 fails -> the logged "other rotations" lines name the right record (sign / layout) -> one rebuild. 3 aims but the view
+jumps for a frame -> "did not rebuild" count in TESTS -> write later in the frame. 4 orbit feels wrong -> push only by the stick
+(game camera) and keep the head's turn in place.
+
+## HEADAIM2 / AIMFIND / FACEFWD / GLOWSCENE (2026-10-27, after JJ's first try)
+
+JJ: "the glow flickers on and off ... when you move your head around just in small increments ... just which angle your head is looking
+at it from"; "The first person camera is inside Batman's head. I can see his teeth. The camera needs to be in front of the head and
+attach to it"; "The head aiming is still not working. When you pull the left trigger to activate the [bat]claw or other weapons, it
+should activate the head aiming".
+LIVE log 00:49:05: "Controller.Rotation at +0x54 confirmed" + "head aim active" and writes every pair, yet no effect on gadget aim =
+the game's camera keeps its own rotation and copies it into the controller (written value overwritten). Looked up: AKVR camera.cpp
+AIMHEAD / AIMTRIGGER (writes the head into the CAMERA's finalize block - the rotation the game reads back for aiming - and only while the
+left trigger is held, akvr_gamepad_left_trigger_ms < 300).
+- AIMFIND (TESTS "Aim finder (20 s)"): 10 samples/s for 20 s of the controller + every game object it points to (0xC00 bytes each, up
+  to 64) with the game camera's yaw / pitch -> captures\aimfinder_<tick>.bin; tools/aimfinder.py lists fields that follow yaw / pitch
+  (rotator units, float degrees, float radians; >= 90 % of samples within 2 deg). Script tested on a synthetic file: the 3 planted
+  fields found, no false ones. Next: write the head into the found camera field(s) like AKVR.
+- AIMTRIGGER: "only while holding the left trigger (gadgets, batclaw)" (default on; [first_person] look_aim_trigger), from
+  input::last_composed_triggers (physical pad and composed controllers); 0.3 s hold after release.
+- FACEFWD: the 25 cm forward push now follows Batman's facing (Pawn.Rotation +0x54, used only while its pitch < 30 deg) instead of the
+  camera's forward - standing still, the camera can turn away from him and the push went back into his head (teeth).
+- GLOWSCENE: the glow input must be hud_capture's scene vote leader (the picture the world was drawn into), a generic screen-size
+  fp16 input only as a counted fallback; status adds "input switched N, without a world leader N, fallback N".
+Built 4/4, installed 2026-10-27 (sha256 06433DB9...). City: the same FACEFWD / AIMTRIGGER / AIMFIND will follow once Origins' finder
+shows the field (City's head aim build writes the controller like Origins' first try).
+Next launch (JJ): press TESTS "Aim finder (20 s)", close the panel, turn the camera all the way round with the right stick (third
+person is fine); check the first-person camera position and the glow; tell me.
+
+## HEADAIM for Origins (JJ 2026-10-27: "head aiming is not working in first-person mode ... I'm talking about origins")
+
+Looked up: batman_asylum BUILD_PLAN HEADAIM + AIMLEVEL (Godoy301 PR #1: write the head's look into Controller.Rotation, remove our
+own contribution each frame, render both eyes from the body basis; body pitch level), this file FIRSTPERSON offsets, memory
+contributor-pr-merge-base / arkham-first-person-asylum-origins.
+SOURCE (first_person.cpp HEADAIM): Controller.Rotation ASSUMED at Actor +0x54 (Origins Location +0x48 + 0xC, as Asylum 0x54 -> 0x60;
+UE3 Actor: Location then Rotation). AIMCHECK: no write until the value's yaw matches the game camera's heading within 4 deg for 30
+frames in a row (log "Controller.Rotation at +0x54 confirmed" / "does NOT match ... head aim stays off" after 600 misses). Per pair
+(first eye): body yaw = controller yaw - our last contribution (stick turns kept), body pitch = 0; target = body basis x head rotation
+(the same z-flipped quaternion matrix scene.cpp delta() renders with); written + read back; both eyes render from the body basis.
+Released (our yaw / pitch taken out, pitch level) on menus, no Batman, camera far, first person or aim off. No stick filter: with
+the body pitch forced level each pair, stick up / down has no lasting effect. Panel: FIRST PERSON -> "aim with your head", status
+text (checking / active / not available), TESTS counters. settings.ini [first_person] look_aim (default 1).
+GLOWRANGE in the same build: strength 0-3 (was 0.40), threshold down to 0.02 (was 0.2) - JJ: glow "not very obvious, even at max
+intensity and lowest threshold" (log: 28538 passes, attached fine). Built 4/4, installed 2026-10-27 (sha256 30041048...). HEADSET
+pending: first look for the "confirmed" line, then gadgets aim where JJ looks.
+FADEHOLD LIVE 00:39:20-21: "3D scene back after 3015 ms" -> "fade-in box gone (panel clear) after 985 ms" = fired on that load.
+
+## GLOW (JJ 2026-10-27: "Keep lens flares removed and add a glow setting to the overlay so we can dial in a nice glow. Maybe it
+## should be similar to the one we added to Arkham City")
+
+HEADSET 00:33 (JJ: "the [streak] that was there before is now gone"): the anamorphic streaks belong to the game's LensFlares option
+(GSA LensFlares false removed them) -> STREAKROLL dropped (streak test button stays in TESTS, unused); lens flares stay off.
+Looked up: batman_city glow.cpp + BATMAN_CITY_PLAN GLOW / NODOF / GAMEGLOW. City's offered controls (game's glow strength = light-shaft
+buffer, smooth edges, bright-light limit, light beams) need City's decoded combine pass - not known in Origins. City's OWN bloom
+(glow_mode 2: Karis prefilter, 13-tap down, tent up; kept, never offered) is engine-independent -> ported as src/game/origins/glow.cpp.
+SOURCE: at the first full-screen Draw(3) per present whose target is 8-bit, screen-size and one PS input is the screen-size fp16
+scene (= the tone-map step; it reads the HDR scene), the glow pyramid is built from that scene and added ONE/ONE onto the scene
+texture itself (own RTV), then the game's draw runs unchanged -> grading / tone mapping treat the glow like light; each eye's own
+scene = glow at the light's depth. Saves / restores RT, blend, depth, raster, viewport, all shader stages, PS b0 / s0 / t0..t7.
+Panel GLOW drawer: "glow around bright lights" (default on), strength 0.06 (0-0.40), "which lights glow" threshold 1.0 (0.2-4),
+size 6 levels (3-7), "default glow"; settings.ini [glow]; `bo glow on|off|strength|threshold|size`; status line
+"[bo] glow ON: ... passes N" (+ "[glow] attached to the tone-map step: scene WxH fmt -> picture WxH fmt" once). Shaders checked
+with fxc (all 5 compile); built, 4/4 checks; installs at game exit. HEADSET pending; if "passes 0" the tone-map guess is wrong
+(it may be indexed / 4 vertices) -> a frame dump of gameplay names the real step.
+
+## TEST PLAN STREAKROLL + CAMHOLD + FADEHOLD + LENSFLAREOFF (one launch, JJ drives, 2026-10-27)
+
+JJ 2026-10-27: "I was talking about actual anamorphic blooms which were at object depth, not lens or HUD depth, so they are fine to
+keep, but I just don't want them rotating when I rotate my head" (lens flares off is fine).
+Looked up: playbook docs grep roll/streak/blur: nothing on screen-space directional effects under head roll; VR_ESSENTIALS §3
+"Shaders that use the camera's AIM" (AKN SUITGLOSS3: give such draws the head-free camera's rows) = the same family; Knight
+FLAREOFF (Luma shader names, swap at creation); memory ak-lens-flare-is-two-shaders.
+Cause (expected): the streak is a horizontal blur in SCREEN space (sample offsets along +-x); head roll rolls the screen, so the
+streak rolls. Fix shape: per eye, rotate the streak pass's sample offsets by -(eye roll vs the game camera), aspect-corrected -
+patch the offsets where the draw reads them (constant buffer at Unmap / per-draw copy, VR_ESSENTIALS §3 "patch the copy the draw
+binds"), or replace the shader if they are literals.
+
+JJ 2026-10-27: "never make me say go and do things interactively with you. Create buttons in the panel" -> STREAKTEST is a panel
+button (TESTS drawer "Streak test (30 s)"): dumps (`frame_inspector::arm(3,2)`, cb mode, 2 present windows) at 6 s (head level) and
+18 s (head tilted ~30 deg from 10 s), each logged with the head's roll ("[bo] STREAKTEST dump N ... head roll X deg"); the panel
+shows the running step. Built + installed 2026-10-27 (dll 3D0C32AF, Graphics-Profile.ps1 C3F04CF7 - LensFlares now optional in the
+GSA store: the write-denied test fixture has none and the strict version threw = would have stopped VR launch for such a player).
+
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | load save | FADEHOLD | no black square; log "fade-in box gone ... after N ms" |
+| 2 | panel TESTS -> "Streak test (30 s)", close the panel, look at a light: level, from 10 s tilted | which passes draw the streak; offsets do not follow the roll | dumps: small-RT full-screen chain with +-x offsets, same in both dumps; logged rolls ~0 and ~30 |
+| 3 | pause open / close x3, a few seconds between | CAMHOLD | JJ: no flicker; log "CAMHOLD ... (menu context)" lines + counts |
+| 4 | look at lights | LENSFLAREOFF | JJ: lens flares gone, anamorphic streaks still there |
+Dumps deleted after analysis (memory clear-recordings-when-done).
+
+## TEST PLAN MENUFLASH + PAUSEDIRT (JJ 2026-10-26: "on the main menu ... the occasional black frame flickering same thing happens in
+## the pause menu I'm getting black flashes and also there is a dirt layer HUD element that's stuck to your face that should probably be
+## removed from the pause menu")
+
+Looked up: this file MAPMONO / MT1-MT2 / EYB1 (Origins' earlier "full field of view blackout for one frame" = untagged mono presents
+captured into the left eye with a stale pose, fixed ONLY for map-type screens - pause and main menu are pause-type, not covered);
+VIEWDEBOUNCE3; memory batman-city-hud-overlays (City PAUSEDIRT / title grime: grime removed = white in place of the dirt) and
+arkham-map-flicker-wrong-signal; VR_DEBUG_TOOLKIT.md (capture first). Log 23:44-23:45 (main menu 25 s, pause 13 s): none of our
+black rules fired (no "all-black", no BOOTBLACK after title, no camera-mode toggles, no-pose 0, MAPMONO skips 0).
+Ranked causes for the flashes: (1) untagged mono presents in pause-type menus captured into the left eye (MAPMONO's cause, not
+covered here); (2) a held / stale eye image on a frame without its pair; (3) Virtual Desktop dropping a frame. EYEBURST tells (1)/(2)
+(flash inside our eye pictures, one eye) from (3) (eye pictures clean).
+PAUSEDIRT (SOURCE, built 2026-10-26, sha256 7B8D1046..., installed): City's grime pass signature swapped with white (`bo pausedirt
+on|off`, default on) + a census of every distinct full-screen Draw(3) picture set while a pause-type menu is up.
+
+| # | JJ does | I trigger | what it proves | how to judge |
+|---|---|---|---|---|
+| 1 | main menu, look around 13 s | `bo eyeburst 2400` | flashes in our eye pictures? | tools/eyeburst_view.py: flash frames, which eye |
+| 2 | pause menu, look around 13 s | `bo eyeburst 2400` | same in pause | same |
+| 3 | pause menu: dirt still on the face? | - | PAUSEDIRT match | log "PAUSEDIRT: the pause grime pass found"; else census lines name Origins' pass |
+| 4 | pause: `bo pausedirt off` 5 s, then on | (switch) | the swap is what removes it | JJ: dirt returns, then goes |
+
+### MENUFLASH RESULTS run 23:53-00:04 (JJ drove; LIVE)
+- PAUSEDIRT census 23:55:26 (pause opening): `t0 4x4 fmt 28 | t1 1328x1424 fmt 10 | t2 256x256 fmt 72` = City's grime pass with a
+  256 dirt (City rule wanted >= 512 -> no match, "grime passes seen 0"). Rule now >= 128 square (4x4 + fp16 scene stays the key).
+- EYEBURST 23:54 title screen 13 s: no flash (max 0.49). 00:03 + 00:03:58 main menu 2 x 13 s: no flash (max 0.85).
+- EYEBURST 23:56 PAUSE 13 s: flashes INSIDE our eye pictures (before DLSS), scores 23 / 15 / 14 / 13 ..., always BOTH eyes of one
+  pair (same gen), in clusters (gens 11771-11777, 11801, 11839, 11864, 11921). Flash pictures (flash_1095 / 1034 / 1220): a view from
+  ABOVE Batman looking straight DOWN at him and the floor, while both neighbours look UP at the skylight = the pitch flipped for one
+  pair. Index: same gen, counters unchanged; status: view-edits = 2 x second renders exactly (every eye view edited, none missed).
+- Tests that ruled things out: `bo reflect off` 23:58 13 s -> no flash, but the reflection hook changes NOTHING while paused (only a
+  counter), so inconclusive; staring still at the skylight 00:01 13 s -> no flash (max 1.8) => not the skylight / a reflection
+  render; flashes seem tied to head MOVEMENT. First person off, camera position 0 (not CAMPOS / FP).
+- History: Origins map 2026-10-13 "occasional full field of view blackout for one frame and also occasionally recenters" (MAPMONO
+  guess) = probably the same bug, so it predates today's STEREOPOSE change.
+FLIPWATCH (built, installs at game exit): per eye render, the game camera's, the head's and the final view's pitch; any > 25 deg jump
+from that eye's previous render is logged with both frames' values (80 lines max). Next run: pause + head movement ~30 s; the lines say
+whether the game camera, the head pose or our view math flips.
+
+### FLIPWATCH RESULTS run 00:08-00:12 (JJ: dirt overlay gone; "the pause menu is flickering heavily" - existed before PAUSEDIRT;
+### "I honestly can't tell if it's a camera jump, but it just feels like black frames"; NEW: black square entering gameplay from load)
+- PAUSEDIRT HEADSET: dirt gone (JJ). 3454 grime passes drawn with white in ~7 s.
+- FLIPWATCH LIVE: only the GAME camera jumps (head pitch steady -3..-5 / 2.2): 00:09:06.27-07.80 and 00:12:25.79+ = the ~1.5 s
+  AFTER the pause menu CLOSES (MENUSTATE Close 00:09:06.240, 00:12:25.185). Base pitch per pair alternates 79.7 / -71.4 / 70.1 /
+  -66 / 19.4 / 34.1 ... (-71.4 and 79.7 recur = fixed cameras), sometimes TWO views in one generation (gen 4333, 4337). No jumps
+  while the pause menu is open (08:53-09:06, 11:48-12:25).
+- EYEBURST 00:11:47 + 00:12:08 (2 x 20 s, pause then close): open pause = 5 frames scoring 2-4.6 at ~3 s in = the game's own grey
+  pause effect animating (bright, not a camera change, flash_480); after the close = 19 flash frames scoring up to 10.6 at the same
+  gens as FLIPWATCH (flash_2053: alternating cameras on Batman) = JJ's "black frames".
+FLIPWATCH2 + LOADBURST (built, install at game exit): FLIPWATCH logs yaw, camera position, views per generation and the identities
+(draw root object, family a1, view state a2, the view) on any jump / 3rd view in a generation (300 lines); LOADBURST records 900
+presents (~8 s, both eyes + HUD sheet) once, when a 3D scene comes back after >= 3 s without one. Disk: one 2400-present burst =
+~1 GB; today's 8 bursts' raw data deleted after analysis (7.8 GB; flash PNGs and flashes.txt kept).
+Next run: load save (LOADBURST catches the black square), pause 5 s, close, play 5 s, pause, close.
+
+### FLIPWATCH2 / LOADBURST RESULTS run 00:17-00:20 (JJ: "Lots of flickering again"; asks if it is the old map flicker - JJ:
+### "The map flicker was flickering a skewed copy of part of the map into the area outside the map window" = a different mechanism)
+- FLIPWATCH2: 300 lines, 286 of them "view 3/4 of this gen" (two stereo pairs with the SAME pose generation, camera steady) after the
+  pause close 00:18:34-00:18:43; pacetrace shows 84-86 pairs/s then (90 in pause), 51-60 pairs/s after the load (00:18:04-09) =
+  the game falls just under 90 Hz and now and then renders a second pair before the next locate (pose reused, ~11 ms stale).
+  Only 14 real jumps, all at scene cuts (title -> main menu 00:17:47 / 00:17:56, load 00:18:00 / 00:18:03). The post-unpause camera
+  alternation (00:09:06, 00:12:25) did NOT happen this run = intermittent.
+- LOADBURST 00:18:03-00:18:11 (load end + first pause opening): eye pictures clean (max score 2.1), finished headset images clean ->
+  the black square is NOT in the eye pictures = on the HUD panel. Matches City FADEHOLD (the game's fade-in from black drawn on the HUD
+  stage = an opaque black box in the room); Origins has gfx_hud FADEHOLD but scene.cpp sets set_fade_hold(0) ("City-specific ... not
+  Origins evidence"). eyeburst HUD files are RGB (alpha dropped), so they cannot show an opaque-black panel; a panel capture with
+  alpha (City debug_panelseq_after_movie / gfx_hud::save_panel_picture) is needed.
+Two launches without a fix -> look up again before the next build (SESSION_START §1): City FADEHOLD / MENUFADE notes, playbook
+failure atlas "single-frame wrong view" / "stale pose", Origins MAPMONO history.
+Looked up again: playbook b955f224 failure-atlas FAIL-STR-017 ("world lurches once per transition ... one frame rendered from a stale
+or wrong viewpoint") -> pattern-catalog STR-010 "drop a bad frame instead of submitting it" (bounded and counted; a suppression that
+fires constantly masks another bug); City BATMAN_CITY_PLAN FADEHOLD (black box entering gameplay = the game's fade-in from black on
+the HUD stage; panel held while 5 probe points are dark + covered, <= 3 s after a movie / load). JJ: the old map flicker was a
+skewed copy of part of the map OUTSIDE the map window = a different mechanism (HUD / menu layer), not this one.
+CAMHOLD (built, installs at exit; `bo camhold on|off`, default on): while a pause-type menu is up or < 3 s after a menu closes, a
+pair whose game camera jumps > 25 deg / 150 UU from the last good one is drawn from the last good camera; a new camera holding 3
+pairs in a row = a real cut, taken. Status: "CAMHOLD pairs held N, real cuts taken N". (Applies STR-010 by redrawing from the good
+camera rather than not submitting - no runtime change, the frame stays paced.)
+FADEHOLD ON for Origins (`bo fadehold 0|1`): triggered by "3D scene back after >= 3 s without one" (load / video end); log
+"gfx_hud: fade-in box gone (...) - panel shown again after N ms" proves it fired. If no box is seen within 0.7 s the panel returns.
+Next run: load save (watch for the black square), pause, close, play 5 s, pause, close (watch for flicker). Judge: JJ + log lines.
+CAMHOLD2 (JJ: "What about the flicker when entering the pause menu?"): no jump was ever logged while a pause menu opened or was up,
+but the 23:56 flashes predate FLIPWATCH, so CAMHOLD is now ALWAYS on (not only around menus); each hold logs the menu context
+(pause-type up / screen menu / none, ms since the last open and close; first 60). Captures folder cleared 2026-10-26 (22.5 GB;
+today's flash PNGs + flashes.txt kept) - JJ rule: clear recordings once analysed (memory clear-recordings-when-done).
+
+## FASTTRAVEL - black headset through the fast-travel cutscene (JJ 2026-10-26: "I went to fast travel and it played a cutscene but I saw nothing in the headset it was just black")
+
+Looked up: this file EYEBATS / EB1 and the O1 bats notes ("cover -> black hold -> reveal; handoff uses the actual per-present
+projection verdict after cinematic fallback ... 60-second watchdog"); memory origins-eyebats-bootblack; menu_state.cpp MS2 note
+(the full-screen-movie flag is TRUE on loading screens too, so it cannot tell a cinematic from a loading screen); hud_capture
+screen-only detector. No fast-travel notes existed.
+LIVE (batman_origins.log 23:20:59-23:21:26, STEREOPOSE build, no-pose=0): map closed -> bats event #3 "bats -> black" ->
+IsPlayingFullScreenMovie TRUE -> letterbox ON (engine cinematic bars) -> "cinematic quad ON (strict=1 stale=1 screenOnly=0)" ->
+nothing until JJ quit; stereo pairs and DLSS kept running. Cause (SOURCE wipe.cpp): the Hold phase reveals only after 350 ms of
+headset PROJECTION; an in-engine cinematic whose camera bypasses CalcView goes to the cinematic screen (projection false), so the
+black covered it for the whole cutscene (60 s watchdog).
+Fix: hud::world_pass() (scene vote leader present, 3-interval hysteresis, beside screen_only); transitions paint_eye treats "cinematic
+screen + world pass" like projection for the bat timeline -> reveal onto the cinematic screen, logged "[bo bats] reveal onto the
+cinematic screen". Loading / FMV screens have no world pass and stay black as designed. Built (4/4), INSTALLED 2026-10-26
+(sha256 6E3CD4A2..., manifest re-checked; previous in backups/pre-FASTTRAVEL-2026-10-26). HEADSET pending.
+Test: fast travel twice (and one normal Continue load): the cutscene shows after the bats; loading screens still black; log line above.
+FASTTRAVEL2 (JJ 23:26 "Still not seeing the cutscene, it's all black"): LIVE log 23:26:19-35 - same sequence, NO reveal line, bats
+phase=3 (Hold) at 23:26:34. Likely cause: world_pass needed 3 presents in a row, but in the cinematic presents and world passes
+alternate (4106 presents / 2637 draw roots in that window), so it never latched (not proven: no log of it). Now: world pass seen
+within 250 ms, edges logged "[hud] world pass ON/off", plus one "[bo bats] black hold over the cinematic screen: 3D scene seen /
+NOT seen" line per hold. Installed 2026-10-26 (sha256 A15E6540...). If it fails again the log names the half that failed.
+FASTTRAVEL3 (JJ 23:31 "It's still not working"; looked up again: the two attempts assumed a 3D cinematic - wrong). LIVE 23:31:01:
+letterbox ON 1.485, "world pass off" 1.618, cinematic quad ON 1.692, "3D scene NOT seen -> stays black" = the fast-travel cutscene
+is a full-screen VIDEO (IsPlayingFullScreenMovie TRUE), no world pass. The EYEBATS design held black over FMV / loading on purpose;
+the flat game shows this video, so any real picture on the cinematic screen now ends the hold: world pass OR the pixel watch's
+letterbox (bars only around picture content; all-black reads "top 1420" = no bars). Expect the short video after Continue
+(23:30:35-38, also letterboxed) to show too. Log: "[bo bats] reveal onto the cinematic screen (letterboxed video / cinematic)".
+Installed 2026-10-26 (sha256 90BE3CB1..., manifest re-checked).
+FASTTRAVEL3 RESULT (JJ 23:33 "still not showing the pre-render video" + "I'm not seeing any bats either"): LIVE 23:33:33.450 "reveal
+onto the cinematic screen" = the hold DID lift, yet still black, and no bats at all -> the problem is upstream of the bats timeline
+(what the headset is sent), not the hold. Not the "all-black frame -> no layers" rule (never logged), not submission idle (no
+heartbeat), room screen live since boot.
+FTPROBE (JJ: "Do you need a test probe or something to capture what's going on at that point?"): armed once per launch by a bats
+event while the map is open (= fast travel); 3 automatic shots at +0.4 s (bats over the map), +2 s and +5 s (video): game_<eye|flat>.bmp
+= the backbuffer as handed over, eye_left / eye_right.bmp = exactly what each eye was sent (room screen path or projection path),
+and a "[probe] shot n" log line: layer sent (NOTHING / eye images / floating quad), layers, projection, cinematic, room screen,
+shouldRender, skipMono (map mono-skip), letterbox, world pass, screen-only, bats-in-eye paint count. In
+%LOCALAPPDATA%\Batman_Origins\captures\probe_<tick>\shot0..2 (~160 MB). Installed 2026-10-26 (sha256 011439A1...).
+Candidates it separates: (a) frames not captured at all (skipMono / shouldRender) = headset holds an old black image; (b) room
+screen draws a black copy (game_flat.bmp has the video but eye images black = copy/source problem); (c) game_flat.bmp itself black
+(the video is not in the backbuffer we copy); (d) floating quad sent instead of eye images (no bats possible on a quad).
+FTPROBE RESULT (run 23:40-23:41, JJ: "The bat and the video actually worked that time"): HEADSET - fast-travel bats + video show.
+Probe: shot0 (bats over the map) eye images sent, projection; shots 1-2 (video) eye images via the room screen, letterbox 337/337,
+world pass 0. (Why the 23:33 run looked black is unproven: same reveal at the same moment; JJ quit 11 s in.) Probe now on request
+only: `bo bats probe` arms it for the next fast travel.
+BATSFLOW (JJ: at the video's end "bats then played across the video and then faded to black and then bats played again across
+full field of view before the game came in ... not very clean"): LIVE 23:41:34.05 video ends, .075 projection back, .13 bats
+event #4 - the picture was ready BEFORE the bats, yet Hold waited cover + 350 ms (the settle counted from the end of the cover).
+wipe.cpp: the 350 ms settle now counts from when the picture came back, so an already-steady picture is revealed the moment the
+cover ends = one bats-in / bats-out. Real loads (no projection) still hold black. Installed 2026-10-26 (sha256 18DB176C...).
+
+## STEREOPOSE - flat-frame fix ported from Asylum (Godoy301's PR #1, HEAD-AIM4; JJ 2026-10-25: "incorporate these ... into the other 3 too")
+
+Looked up: Asylum BUILD_PLAN "HEADAIM" (the PR and its evidence); this game's VIEWDEBOUNCE3 (scene.cpp: "the gameplay caller itself
+can be ineligible for one frame (no fresh pose generation) ... that frame renders mono") = the same cause; VR_ESSENTIALS §4, playbook
+09 #pose-timing-contract, STR-002. City and Knight do NOT have this bug (City builds both eyes from one head read; Knight holds the last
+head pose), and all three already have a world-scale slider. Head aim is not ported yet (needs each game's own Controller.Rotation
+offset and HUD path; after JJ tries it in Asylum).
+
+Cause (SOURCE): openxr_runtime published the head pose + generation before xrLocateViews; draw_detour read the head, then that
+generation's eyes from the pose ring under a second lock. A read between the two found no eyes -> poseValid false -> mono frame.
+Fix: core/vr/stereo_pose_mailbox.h (verbatim from Asylum) published after both locates and the ring; draw_detour takes head, eyes,
+FOVs and generation from ONE read (vr::get_stereo_pose). Tracking loss and teardown still invalidate it. New status count `no-pose`
+(draw roots without a complete sample). VIEWDEBOUNCE3 stays (it also covers foreign draw roots).
+Built in build-stereopose (Release, no warnings), 4/4 checks (build includes CAMPOS). INSTALLED 2026-10-25 (JJ "Yes, install"):
+batman_origins.dll sha256 9BC78D19..., originsvr_manifest.json updated and every listed file re-checked; previous CAMPOS DLL +
+manifest in backups/pre-STEREOPOSE-2026-10-25. NOT released.
+
+### TEST PLAN STEREOPOSE (JJ drives, one launch; CAMPOS tests can share it)
+| # | what JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | 5 min gameplay, head moving, through snow / smoke and a map open-close | no flat frames | none seen; `[bo] status ... no-pose` small, and the VIEWDEBOUNCE "camera mode off -> ON" blips gone from the log |
+| 2 | Meta-button recentre, take the headset off and on | tracking loss / recovery | picture returns normally, no stuck flat view |
+
+## CAMPOS - adjustable third-person camera position from Arkham Knight (JJ 2026-10-25: "put the adjustable camera from our Arkham knight mod panel into the other 3 arkham mods")
+
+Looked up: AKVR TPOFFSET (akvr/src/camera.cpp TPOFFSET, hooks.cpp VIEW "camera position"; akvr_native/NOTES.md "TPPITCH + TPOFFSET
+2026-10-18", released in AK 0.3.1); this game's FIRSTPERSON / FPGATE (the camera mover this rides on); memory
+arkham-first-person-asylum-origins, batman-city-first-person, origins-install-manifest. Playbook / framework: nothing new needed - a
+translation of the head-free game camera at the scene-view inputs, the engine rebuilds culling from it (same route as first person).
+AK's TPPITCH look-down limit was NOT ported (it is a separate AK-only control; JJ asked for the camera position).
+
+What it does (SOURCE): panel VIEW -> "camera position  (third person)" (open the first time): left / right, down / up, back / forward,
+-300..+300 cm each, "Reset position". The game camera's origin moves along its LEVEL right / LEVEL forward and world up (AK's frame,
+so it never swings with the head or tilts with the camera's pitch). Applied to the head-free game camera before the eye offsets, so
+both eyes, markers and AFW follow it. Only in third-person gameplay: off in first person and through first person's FPGATE checks
+(menus, no Batman found, game camera more than 12 m from Batman = main menu stand-in, distant cutscenes). Costs
+nothing while all three are 0 (default). The game's own camera collision does not know about the shift: big values can put the
+camera into walls (same as AK).
+Saved: settings ini [camera_position] right_cm / up_cm / forward_cm (first_person.cpp save/install). Command: `bo fp cam R U F` (cm). Status: "moved frames N" under TESTS.
+
+Built (Release, no warnings), offline checks pass; installed batman_origins.dll into JJ's game folder 2026-10-25 (previous DLL + manifest in
+backups/pre-CAMPOS-2026-10-25; launcher manifest hash updated and re-checked). Not released. HEADSET pending.
+
+### TEST PLAN CAMPOS (JJ drives, one launch, no restart needed)
+| # | what JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | gameplay, panel VIEW -> camera position: left / right to +60 | the shift happens, along the level right | Batman slides to the left of the view, horizon stays level |
+| 2 | turn with the stick and with the head | frame is the game camera's heading, not the head | offset stays to the side of Batman on stick turns; no swing on head turns |
+| 3 | down / up +50, back / forward -100 | the other two axes | camera higher / further back; looking down does not tilt the shift |
+| 4 | pause menu, map, first person on | the gates | game camera unchanged in menus and first person |
+| 5 | Reset position | defaults restore | the game's own framing |
+
 ## HEADLOCK - first-person head through the camera (JJ 2026-10-20, seen in Asylum 0.1.3)
 
 Asylum's head read faulted every frame (unaligned matrix buffer, batman_asylum BUILD_PLAN HEADLOCK). Origins uses
@@ -1266,7 +1905,8 @@ launch (Find-SteamVR32, active install first). README: one Pimax troubleshooting
 - OFFLINE: bo_xr_config32 with VD's 64-bit manifest forced -> exit 4; launcher parses. Package changed vs 0.1.0 =
   batman_origins.dll, bo_xr_config32.exe, Launch-VR.ps1, version.txt, README; settings = the 0.1.0 zip's settings.ini.
 - HEADSET pending (JJ regression check on VD; Pimax players).
-
+
+
 ## RELEASE 0.1.2 (same fix as Asylum) - Pimax menu / HUD double vision (PIMAX2, 2026-10-17)
 
 Report (via JJ): Pimax player, "the main menu and HUD have double vision with OpenXR" (not with SteamVR). Looked up: VR_ESSENTIALS

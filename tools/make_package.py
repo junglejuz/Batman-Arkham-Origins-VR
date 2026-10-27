@@ -9,7 +9,7 @@ import argparse, hashlib, os, re, shutil, sys, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-VERSION = '0.1.4'
+VERSION = '0.1.5'
 ap = argparse.ArgumentParser()
 ap.add_argument('--settings', default=os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Batman_Origins', 'settings.ini'))
 a = ap.parse_args()
@@ -50,7 +50,11 @@ put(a.settings, os.path.join('files', 'settings.ini'))
 # FIRSTPERSON: new players start in third person whatever JJ last used (City SHIP_OVERRIDES first_person=0).
 sp = os.path.join(stage, 'files', 'settings.ini')
 st = open(sp, encoding='latin-1').read()
-open(sp, 'w', encoding='latin-1', newline='').write(re.sub(r'(?ims)(^\[first_person\][^\[]*?^on=)1', r'\g<1>0', st))
+st = re.sub(r'(?ims)(^\[first_person\][^\[]*?^on=)1', r'\g<1>0', st)
+# 0.1.5: the removed glow's section and the superseded lens-flare key are not shipped
+st = re.sub(r'(?ims)^\[glow\][^\[]*', '', st)
+st = re.sub(r'(?im)^level_world=\d+\r?\n', '', st)
+open(sp, 'w', encoding='latin-1', newline='').write(st)
 open(os.path.join(stage, 'files', 'version.txt'), 'w', newline='\n').write(VERSION + '\n')
 for f in ('README.md', 'LICENSE-bioshock-vr.txt', 'LICENSE-luma-framework.md', 'THIRD_PARTY_NOTICES.md'):
     put(os.path.join(ROOT, f), f)

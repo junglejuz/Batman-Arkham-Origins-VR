@@ -5,6 +5,7 @@
 // quad layer containing a copy of the game backbuffer.
 
 #include "core/vr/openxr_runtime.h"
+#include "core/vr/stereo_pose_mailbox.h"
 #include "core/vr/eye_burst.h"
 #include "core/ui/overlay.h"
 
@@ -198,6 +199,12 @@ std::atomic<int> g_repeatLockFps{0};
 // the headset) - JJ's captures had no pictures. Present thread; one file per eye.
 wchar_t g_eyeSaveDir[MAX_PATH] = {};
 std::atomic<int> g_eyeSaveMask{0}; // bit 0 = left still to save, bit 1 = right
+// FTPROBE: armed by the adapter (bats while the map is open = fast travel); present thread takes the shots.
+std::atomic<uint64_t> g_probeArmMs{0};
+int g_probeNext = 0;          // present thread: next shot index
+int g_probeShotNow = -1;      // present thread: shot being taken this present, -1 none
+wchar_t g_probeShotDir[MAX_PATH] = {};
+constexpr uint64_t kProbeAtMs[3] = {400, 2000, 5000};
 // Runtime recentre (Meta button held): applied once the frame being predicted is past changeTime.
 XrTime g_runtimeRecenterAt = 0;
 bool g_runtimeRecenterPending = false;
@@ -245,6 +252,10 @@ void repeat_bank(const XrCompositionLayerBaseHeader* const* layers, uint32_t cou
 // HUD quad: ROOM-FIXED by default (AKVR HUDWORLD 2026-09-29; head-attached quads warp under
 // Virtual Desktop). Anchored in front of the head when it (re)appears; option to attach to head.
 std::atomic<bool> g_hudHeadLocked{false};
+// HUDAIM (JJ 2026-10-27: "The HUD should move with my head when holding down the left Trigger"): the adapter sets this while the
+// left trigger (aim) is held in gameplay; the HUD then rides the head like "attach UI to head movement" and returns to its room
+// place on release (the room pose is kept, not re-placed).
+std::atomic<bool> g_hudAimHead{false};
 // HUDEYES (VR_HUD_GUIDE section 1, AKVR HUDEYES / SKVR HUDEYES3; JJ 2026-10-09: "move the HUD a little further away,
 // similar to Arkham Knight"): Virtual Desktop draws a quad layer for both eyes from the head centre, so a lone HUD
 // quad has no depth of its own. The HUD is submitted as two quads (left / right eye), each moved by that eye's offset
@@ -327,6 +338,8 @@ constexpr uint32_t kPoseGens = 16;
 PoseGen g_poseGens[kPoseGens];
 std::mutex g_poseGenMutex;
 uint32_t g_poseGenCounter = 0;
+// STEREOPOSE (Asylum HEAD-AIM4, Godoy301's PR #1): head + both eyes + FOVs of one locate, published together.
+StereoPoseMailbox g_stereoPose;
 uint32_t g_headPoseGen = 0;             // under g_poseMutex, with g_headPose
 std::atomic<bool> g_exactPoseTag{true};
 std::atomic<uint32_t> g_srDirectGen{0};  // render thread: gen of the frame about to present
@@ -2412,6 +2425,7 @@ void teardown_session(const char* why) {
         std::lock_guard<std::mutex> lock(g_poseMutex);
         g_poseValid = false;
     }
+    g_stereoPose.invalidate();
     g_viewsValid = false;
     g_viewsContentValid = false;
     g_projectionReady.store(false, std::memory_order_relaxed);
@@ -3545,6 +3559,20 @@ void on_present_begin(IDXGISwapChain* swapchain) {
         pg.v[1] = g_views[1];
         pg.valid = g_viewsValid;
     }
+    // STEREOPOSE: the head above is published before xrLocateViews, so a game-thread read between the two found a new
+    // head generation with no eyes yet and drew that frame flat (Origins VIEWDEBOUNCE3's "no fresh pose generation").
+    // Native stereo reads this complete sample instead.
+    StereoPose stereo{}; stereo.generation = thisGen;
+    stereo.head = {sl.pose.position.x, sl.pose.position.y, sl.pose.position.z,
+                   sl.pose.orientation.x, sl.pose.orientation.y, sl.pose.orientation.z, sl.pose.orientation.w};
+    for (int e = 0; e < 2; ++e) {
+        const auto& v = g_views[e];
+        stereo.eyes[e] = {v.pose.position.x, v.pose.position.y, v.pose.position.z,
+                          v.pose.orientation.x, v.pose.orientation.y, v.pose.orientation.z, v.pose.orientation.w};
+        stereo.angles[e][0] = v.fov.angleLeft; stereo.angles[e][1] = v.fov.angleRight;
+        stereo.angles[e][2] = v.fov.angleUp; stereo.angles[e][3] = v.fov.angleDown;
+    }
+    g_stereoPose.publish(stereo, poseOk && g_viewsValid);
     phase_record(kPhLocate, tPhase);
     // s51: the VDXR view logger - a bounded, self-expiring burst (the fov-watch
     // lesson: nothing unthrottled lives on the present path). Answers whether
@@ -4143,6 +4171,12 @@ bool screen_room_render(ID3D11Texture2D* backbuffer, const XrPosef& screen, floa
             for (int c = 0; c < 4; ++c) eye_clip(g_views[e], world[c], clip[c]);
             ok = rtv && bvr::blit::screen_in_eye(g_context, rtv, g_swapW, g_swapH, g_flatSrv, clip);
             if (ok) transition_in_eye(e, idx, g_views[e].fov, false); // EYEBATS: over the room, full view
+            if (ok && g_probeShotNow >= 0) { // FTPROBE: exactly what this eye is sent
+                wchar_t p[MAX_PATH];
+                swprintf_s(p, L"%s\\%s.bmp", g_probeShotDir, e ? L"eye_right" : L"eye_left");
+                bvr::gfx_hud::save_texture_bmp(g_context, g_images[e][idx].texture, p);
+                g_eyeSaveMask.fetch_and(~(1 << e), std::memory_order_relaxed);
+            }
         }
         XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         xrReleaseSwapchainImage(g_swapchains[e], &ri);
@@ -4227,6 +4261,19 @@ void on_present_end(IDXGISwapChain* swapchain) {
         return;
     }
     g_lastIdleLogMs = 0; // submitting again - re-arm the idle heartbeat
+    // FTPROBE: start a due shot (it stays open across a held-left present until this frame's xrEndFrame logs it).
+    if (g_probeShotNow < 0 && g_probeNext < 3) {
+        const uint64_t arm = g_probeArmMs.load(std::memory_order_acquire);
+        if (arm && GetTickCount64() >= arm + kProbeAtMs[g_probeNext]) {
+            g_probeShotNow = g_probeNext++;
+            wchar_t base[MAX_PATH];
+            wcsncpy_s(base, g_probeShotDir, _TRUNCATE);
+            if (wchar_t* s = wcsrchr(base, L'\\'); s && g_probeShotNow > 0) *s = 0; // strip the previous shot folder
+            swprintf_s(g_probeShotDir, L"%s\\shot%d", base, g_probeShotNow);
+            CreateDirectoryW(g_probeShotDir, nullptr);
+            save_eye_pictures(g_probeShotDir); // projection presents save eye_left / eye_right as they capture
+        }
+    }
     bool pairSecond = g_srPairOpen; // this present completes an open pair
     g_srPairOpen = false;
     g_frameOpen = false; // the pair-hold path below re-arms both
@@ -4459,6 +4506,11 @@ void on_present_end(IDXGISwapChain* swapchain) {
     if (g_frameState.shouldRender && g_swapchains[0] != XR_NULL_HANDLE && !skipMono) {
         ID3D11Texture2D* backbuffer = nullptr;
         if (SUCCEEDED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer)))) {
+            if (g_probeShotNow >= 0) { // FTPROBE: the game's own frame, as this present hands it over
+                wchar_t p[MAX_PATH];
+                swprintf_s(p, L"%s\\game_%s.bmp", g_probeShotDir, srFrame ? (srSign < 0 ? L"left" : L"right") : L"flat");
+                bvr::gfx_hud::save_texture_bmp(g_context, backbuffer, p);
+            }
             int srEye = srSign < 0 ? 0 : 1;
             int target = srFrame ? srEye
                          : (aerActive && imageSign == currentEyeSign) ? g_currentEye
@@ -4989,11 +5041,13 @@ void on_present_end(IDXGISwapChain* swapchain) {
                     // alpha - premultiplied compositor semantics (no
                     // UNPREMULTIPLIED bit).
                     hudQuad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
-                    const bool hudHead = g_hudHeadLocked.load(std::memory_order_relaxed);
                     const bool menuNow = g_hudMenuNow.load(std::memory_order_relaxed) ||
                                          (g_hudMenuSeenAt.load(std::memory_order_relaxed) != 0 &&
                                           g_presentsSeen.load(std::memory_order_relaxed) -
                                                   g_hudMenuSeenAt.load(std::memory_order_relaxed) < 12);
+                    const bool hudAim = !menuNow && !g_hudHeadLocked.load(std::memory_order_relaxed) &&
+                                        g_hudAimHead.load(std::memory_order_relaxed);
+                    const bool hudHead = g_hudHeadLocked.load(std::memory_order_relaxed) || hudAim; // HUDAIM
                     if (menuNow != g_hudMenuWas) { g_hudMenuWas = menuNow; g_hudPlaced = false; }
                     const float hudDist = menuNow ? g_hudMenuDistM.load(std::memory_order_relaxed)
                                                   : g_hudDistM.load(std::memory_order_relaxed);
@@ -5014,7 +5068,9 @@ void on_present_end(IDXGISwapChain* swapchain) {
                         {0, 0}, {static_cast<int32_t>(hd.Width), static_cast<int32_t>(hd.Height)}};
                     if (hudHead) {
                         hudQuad.pose.orientation.w = 1.0f;
-                        hudQuad.pose.position = {0.0f, menuNow ? 0.0f : g_hudUpM.load(std::memory_order_relaxed),
+                        // HUDAIM2 (JJ 2026-10-27: batclaw "above ... the actual reticle"): aiming, the reticle sits exactly on the
+                        // head's aim, not at the HUD's height offset.
+                        hudQuad.pose.position = {0.0f, menuNow || hudAim ? 0.0f : g_hudUpM.load(std::memory_order_relaxed),
                                                  -hudDist};
                     } else {
                         hudQuad.pose = g_hudPose;
@@ -5138,6 +5194,19 @@ void on_present_end(IDXGISwapChain* swapchain) {
     }
 
     flush_held_left(true, "frame submitted without its right eye"); // OVERLAP catch-all: no held image past here
+    if (g_probeShotNow >= 0) { // FTPROBE: what this frame sends the headset
+        unsigned lbTop = 0, lbBot = 0;
+        const bool lb = bvr::hud::letterbox(&lbTop, &lbBot);
+        BVR_LOG("[probe] shot %d (%ls): sent %s, layers %u | projection %d cinematic %d screenRoom %d roomFrames %u | "
+                "shouldRender %d skipMono %d | letterbox %d (%u/%u of %u) worldPass %d screenOnly %d | bats-in-eye paints %u",
+                g_probeShotNow, g_probeShotDir,
+                layerCount == 0 ? "NOTHING (whole view black)" : g_lastLayer == 2 ? "eye images (projection layer)" : "a floating screen (quad)",
+                layerCount, projectionMode ? 1 : 0, g_cineActive.load(std::memory_order_relaxed) ? 1 : 0,
+                g_screenRoom.load(std::memory_order_relaxed) ? 1 : 0, g_screenRoomFrames.load(),
+                g_frameState.shouldRender ? 1 : 0, skipMono ? 1 : 0, lb ? 1 : 0, lbTop, lbBot, g_bbH,
+                bvr::hud::world_pass() ? 1 : 0, bvr::hud::screen_only() ? 1 : 0, g_transitionEyeDraws.load());
+        g_probeShotNow = -1;
+    }
     XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
     fei.displayTime = g_frameState.predictedDisplayTime;
     fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
@@ -5680,6 +5749,15 @@ void set_pose_lag(int lag) {
 
 int get_pose_lag() { return g_poseLag.load(std::memory_order_relaxed); }
 
+bool get_stereo_pose(StereoPose& out) {
+    if (!g_stereoPose.read(out)) return false;
+    g_consumedHeadQuat[0].store(out.head.qx, std::memory_order_relaxed);
+    g_consumedHeadQuat[1].store(out.head.qy, std::memory_order_relaxed);
+    g_consumedHeadQuat[2].store(out.head.qz, std::memory_order_relaxed);
+    g_consumedHeadQuat[3].store(out.head.qw, std::memory_order_relaxed);
+    g_consumedHeadCount.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
 bool get_head_pose_gen(HeadPose& out, uint32_t* gen) {
     std::lock_guard<std::mutex> lock(g_poseMutex);
     if (!g_poseValid) return false;
@@ -5955,6 +6033,17 @@ void save_eye_pictures(const wchar_t* dir) {
     wcsncpy_s(g_eyeSaveDir, dir, _TRUNCATE);
     g_eyeSaveMask.store(3, std::memory_order_relaxed);
 }
+void probe_arm(const char* why) {
+    static std::atomic<bool> s_used{false};
+    if (s_used.exchange(true)) return; // once per launch (~160 MB of pictures)
+    wchar_t parent[MAX_PATH];
+    swprintf_s(parent, L"%s\\captures", bvr::log::data_dir());
+    CreateDirectoryW(parent, nullptr);
+    swprintf_s(g_probeShotDir, L"%s\\probe_%llu", parent, GetTickCount64());
+    CreateDirectoryW(g_probeShotDir, nullptr);
+    g_probeArmMs.store(GetTickCount64(), std::memory_order_release);
+    BVR_LOG("[probe] armed (%s): shots at +0.4, +2 and +5 s into %ls", why, g_probeShotDir);
+}
 uint32_t runtime_recenter_count() { return g_runtimeRecenters.load(std::memory_order_relaxed); }
 bool runtime_is_steamvr() { return strstr(g_runtimeName, "SteamVR") != nullptr; } // SVRGLOW
 void set_screen_room(bool on) { g_screenRoom.store(on, std::memory_order_relaxed); }
@@ -6001,6 +6090,7 @@ void set_hud_menu_quad(float distM, float widthM) { g_hudMenuDistM.store(distM);
 void get_hud_menu_quad(float* distM, float* widthM) { *distM = g_hudMenuDistM.load(); *widthM = g_hudMenuWidthM.load(); }
 bool hud_eyes_active() { return hud_eyes_on(); }
 bool hud_head_locked() { return g_hudHeadLocked.load(std::memory_order_relaxed); }
+void set_hud_aim_head(bool on) { g_hudAimHead.store(on, std::memory_order_relaxed); }
 void get_screen_quad(float* distM, float* widthM) {
     if (distM) *distM = g_screenDistM.load(std::memory_order_relaxed);
     if (widthM) *widthM = g_screenWidthM.load(std::memory_order_relaxed);
@@ -6457,6 +6547,7 @@ void set_pace_detach(bool) {}
 void set_pace_sync(bool) {}
 void set_spike_trace(bool) {}
 void set_pose_lag(int) {}
+bool get_stereo_pose(StereoPose&) { return false; }
 bool get_head_pose_gen(HeadPose&, uint32_t*) { return false; }
 void sr_set_present_gen(uint32_t) {}
 void set_exact_pose_tag(bool) {}
@@ -6487,6 +6578,7 @@ void set_repeat_lock(int) {}
 void repeat_stats(uint32_t* a, uint32_t* b, uint32_t* c) { if (a) *a = 0; if (b) *b = 0; if (c) *c = 0; }
 void set_flat_screen(bool) {}
 void save_eye_pictures(const wchar_t*) {}
+void probe_arm(const char*) {}
 uint32_t runtime_recenter_count() { return 0; }
 bool runtime_is_steamvr() { return false; }
 void set_screen_room(bool) {}
@@ -6496,6 +6588,7 @@ void set_vignette_look(float, float, float) {}
 void get_vignette_look(float* s, float* c, float* r) { if (s) *s = 0; if (c) *c = 0; if (r) *r = 0; }
 void set_hud_head_locked(bool) {}
 bool hud_head_locked() { return false; }
+void set_hud_aim_head(bool) {}
 void set_hud_eyes(int) {}
 void set_hud_menu_now(bool) {}
 bool hud_menu_now() { return false; }
