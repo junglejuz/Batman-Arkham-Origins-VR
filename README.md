@@ -27,6 +27,14 @@ behind when the camera swings. Made the same way as [Batman City VR](https://git
   camera sits at Batman's eyes and follows his head; it switches back by itself in menus, the map and movies, and whenever the game moves its camera away from him. Leaning back stops just in front of his face.
 - **Aim with your head**: hold the left trigger and the batclaw and other gadgets go where you look, in first and third
   person. The HUD and its reticle follow your head while you aim, and the aim allows for how far away the target is.
+- **Grapple points where you look**: look up or around with your head and the game's grapple markers appear on what
+  you can reach, without turning the camera with the stick. The markers stay locked on their spot. With "also left /
+  right" (on by default) the stick walks Batman where you look; untick it to keep looking left / right to yourself.
+- **Enemy info and detective-mode details point at their targets**: the labels the game hangs on people (enemy info,
+  vital signs in detective mode) sit on the person they belong to, in both eyes.
+- **Detective mode and the evidence scanner drawn once for both eyes**: their vignette, honeycomb, scan lines and the
+  moving stripes in the outlines are shared by both eyes, so they fuse into one picture. In the evidence scanner the
+  HUD follows your head, so you scan by looking.
 - **Camera position**: move the third-person camera left / right, up / down and closer / further (VR menu, VIEW >
   camera position).
 - **Lens flares that stay put**: the light streaks face the game camera, so they no longer turn when you move your head.

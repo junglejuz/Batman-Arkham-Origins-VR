@@ -6,6 +6,8 @@
 #include "first_person.h"
 #include "flare_roll.h"
 #include "aim_depth.h"
+#include "markers.h"
+#include "detective.h"
 #include "menu_state.h"
 #include "reflect.h"
 #include "core/vr/eye_burst.h"
@@ -78,6 +80,9 @@ thread_local unsigned afwNext=0;
 float refYaw=0,refPos[3]{};
 void settings_save(); // below
 struct M4 { float m[4][4]; };
+thread_local M4 labelBase{};            // LABELFIX: this pass's drawn camera, before the eye (ctor_detour)
+thread_local float labelHead[3]{};      // LABELFIX: this pass's head centre, recentred XR metres
+thread_local bool labelPass=false;
 struct Tag { void* viewport; W gen; int sign; bool afw; W slot; };
 constexpr unsigned kTags=64;
 Tag tags[kTags]{};
@@ -178,6 +183,8 @@ W __fastcall begin_detour(void* self,void* edx) {
     reflect::set_render_pass(begins.load(),tag.sign);
     flare_roll::note_eye_pass(tag.sign); // FLAREROLL: this eye's tilt for the lens-flare steps
     aim_depth::note_eye_pass(tag.sign); // AIMDEPTH: the left eye's depth under the head's aim
+    markers::set_render_slot(tag.slot); // MARKEREYE (OM1): this BeginDrawing's pass
+    detective::set_render_pass(tag.sign); // DETVR: this pass's eye
     begins++;
     return beginOriginal(self,edx);
 }
@@ -327,7 +334,8 @@ void* __fastcall calc_detour(void* self,void* edx,void* family,float* loc,int32_
         const bool menuUp=menu_state::live() && menu_state::menu_open();
         first_person::update(self,menuUp ? "menu (pause, map, upgrades)" : nullptr);
         // HUDAIM (JJ 2026-10-27: "The HUD should move with my head when holding down the left Trigger"): first and third person.
-        vr::set_hud_aim_head(hudAim.load() && !menuUp && first_person::left_trigger_now());
+        // SCANHUD (JJ 2026-10-28): in the evidence scanner too - its centre target is HUD, the scan direction follows the head
+        vr::set_hud_aim_head(hudAim.load() && !menuUp && (first_person::left_trigger_now() || detective::scanner_active()));
     }
     if(ours) ++calcDepth;
     void* out=calcOriginal(self,edx,family,loc,rot,viewport,drawer);
@@ -383,10 +391,14 @@ void* __fastcall ctor_detour(void* self,void* edx,A28) {
         }
         if(pairHeld) base=good;
     }
+    const M4 gameBase=base; // MARKERSTEER: the game camera as the game built it (steered by the head while head aim / look runs)
     {   // FIRSTPERSON: the game camera at his eyes (everything below follows it); HEADAIM gets the pair's head orientation
         const float hq[4]={head.qx,head.qy,head.qz,head.qw};
+        first_person::note_game_lens(projection.m[0][0]); // ZOOMFOLLOW: the game's own lens (zoom)
         first_person::apply(base.m,worldScale.load(),hq,eyeSign<0 || afwFrame,eyeSign>0 || afwFrame);
     }
+    labelBase=base; labelPass=true; // LABELFIX: this pass's drawn camera and head centre
+    for(int j=0;j<3;j++) labelHead[j]=0.5f*((&eyes[0].px)[j]+(&eyes[1].px)[j]);
     int e=eyeSign<0 ? 0 : 1;
     M4 view=mul(base,delta(eyes[e]));
     {   // LEANBACK: in first person the lens never goes back into his head when the player leans back
@@ -510,7 +522,77 @@ void* __fastcall ctor_detour(void* self,void* edx,A28) {
     }
     vr::set_rendered_hfov(2*std::atan(1/proj.m[0][0])*57.29578f);
     vr::publish_gameplay_view(true);
-    return ctorOriginal(self,edx,P28(W(reinterpret_cast<uintptr_t>(&view)),W(reinterpret_cast<uintptr_t>(&proj))));
+    void* built=ctorOriginal(self,edx,P28(W(reinterpret_cast<uintptr_t>(&view)),W(reinterpret_cast<uintptr_t>(&proj))));
+    {   // MARKEREYE (OM1, Batman City markers.cpp): this pass's view x lens, and the head-free marker reference - the GAME camera's
+        // rotation (MARKERSTEER: steered by the head while head aim / look runs) at the drawn position, through this eye's lens made
+        // symmetric (the HUD script lays markers out in a centred picture).
+        M4 refView=base; float bo[3];
+        for(int i=0;i<3;i++) bo[i]=-(base.m[3][0]*base.m[i][0]+base.m[3][1]*base.m[i][1]+base.m[3][2]*base.m[i][2]);
+        for(int i=0;i<3;i++) for(int j=0;j<3;j++) refView.m[i][j]=gameBase.m[i][j];
+        for(int j=0;j<3;j++) refView.m[3][j]=-(bo[0]*refView.m[0][j]+bo[1]*refView.m[1][j]+bo[2]*refView.m[2][j]);
+        M4 refLens=unjittered; refLens.m[2][0]=refLens.m[2][1]=0;
+        const M4 refVp=mul(refView,refLens);
+        markers::set_pass(slotNow,eyeSign,draws.load(),&vp.m[0][0],&refVp.m[0][0]);
+    }
+    return built;
+}
+// MARKEREYE (OM1): the HUD script's Canvas.Project - FSceneView project RVA 0x5BB7C0 (thiscall: FVector4* out, const FVector* in;
+// ret 8; out = x/w, y/w, z/w, w through view+0x250), called from UCanvas::execProject (return RVA 0x4F09B2). Found by City's code shape
+// (City 0x972FB0 / 0x8FDFD2, the only match in the image; STATIC 2026-10-27 night).
+// LABELFIX (Batman Asylum A2f, JJ "Looks great" there; JJ 2026-10-27 night for Origins: "the pointers that are attached to world
+// objects like enemies and show information about them or labels on the HUD are not fixed to what they should be pointing to ... the
+// vital stats for game characters is the same issue"). STATIC: the HUD's actor-callout code projects each target ONCE and builds its
+// label from that point - Origins 0xCCDBD7 (return RVA 0x8CDBDC) and the same function's centre-distance call 0xCCDD2D (return RVA
+// 0x8CDD32); Asylum 0x158A366 and City 0xC57D0E have the same shape (depth <= 1, push the actor, x * 0.5, -y * 0.5). That point comes
+// from this eye's head-tracked view, but the HUD sheet is ONE room-fixed panel. Corrected before the label is built: the point becomes
+// where the line from the head centre to the target crosses the HUD panel, in the panel's picture coordinates - the same for both
+// eyes; z / w kept. Behind / off-screen / no panel (HUD riding the head, menus) = the game's own value.
+std::atomic<bool> labelFix{true};
+std::atomic<unsigned> labelFixed{0},labelKept{0};
+// LABELFIX: the point where the line from the head centre to the target crosses the panel (corners top-left, top-right,
+// bottom-left), in the panel's picture coordinates (-1..1, y up). Asylum markers9.cpp plane_target.
+bool label_on_panel(const float target[3],const float head[3],const float c[3][3],float xy[2]) {
+    float right[3],down[3],ray[3];
+    for(int j=0;j<3;j++) { right[j]=c[1][j]-c[0][j]; down[j]=c[2][j]-c[0][j]; ray[j]=target[j]-head[j]; }
+    const float n[3]={right[1]*down[2]-right[2]*down[1],right[2]*down[0]-right[0]*down[2],right[0]*down[1]-right[1]*down[0]};
+    float num=0,den=0,rr=0,dd=0;
+    for(int j=0;j<3;j++) { num+=(c[0][j]-head[j])*n[j]; den+=ray[j]*n[j]; rr+=right[j]*right[j]; dd+=down[j]*down[j]; }
+    if(std::fabs(den)<1e-6f || rr<1e-6f || dd<1e-6f) return false;
+    const float t=num/den;
+    if(!std::isfinite(t) || t<=0) return false;
+    float u=0,v=0;
+    for(int j=0;j<3;j++) { const float o=head[j]+t*ray[j]-c[0][j]; u+=o*right[j]/rr; v+=o*down[j]/dd; }
+    xy[0]=2*u-1; xy[1]=1-2*v;
+    return std::isfinite(xy[0]) && std::isfinite(xy[1]);
+}
+void label_fix(const float* in,float* out) {
+    if(!labelFix.load(std::memory_order_relaxed) || !labelPass || !eyeSign) return;
+    float o[4]; memcpy(o,out,16);
+    if(!(o[3]>0.001f) || std::fabs(o[0])>1.1f || std::fabs(o[1])>1.1f) { labelKept.fetch_add(1,std::memory_order_relaxed); return; }
+    float c[3][3];
+    if(!vr::get_hud_plane(c)) { labelKept.fetch_add(1,std::memory_order_relaxed); return; }
+    for(auto& p:c) { vr::HeadPose h{}; h.qw=1; h.px=p[0]; h.py=p[1]; h.pz=p[2]; apply_reference(h); p[0]=h.px; p[1]=h.py; p[2]=h.pz; }
+    const float uu=worldScale.load();
+    float v[3];
+    for(int j=0;j<3;j++) v[j]=in[0]*labelBase.m[0][j]+in[1]*labelBase.m[1][j]+in[2]*labelBase.m[2][j]+labelBase.m[3][j];
+    const float target[3]={v[0]/uu,v[1]/uu,-v[2]/uu}; // game view space -> recentred XR (x right, y up, -z forward)
+    float xy[2];
+    if(!label_on_panel(target,labelHead,c,xy)) { labelKept.fetch_add(1,std::memory_order_relaxed); return; }
+    if(labelFixed.fetch_add(1,std::memory_order_relaxed)<6)
+        BVR_LOG("[bo] LABELFIX: target %.0f/%.0f/%.0f eye %c game point %.3f/%.3f -> on the HUD panel %.3f/%.3f",in[0],in[1],in[2],
+                eyeSign<0 ? 'L' : 'R',o[0],o[1],xy[0],xy[1]);
+    out[0]=xy[0]; out[1]=xy[1];
+}
+using ProjFn=float*(__fastcall*)(void*,void*,float*,const float*);
+ProjFn projOriginal=nullptr;
+float* __fastcall proj_detour(void* view,void* edx,float* out,const float* in) {
+    float* r=projOriginal(view,edx,out,in);
+    const uintptr_t ra=reinterpret_cast<uintptr_t>(_ReturnAddress());
+    if(ra==imageBase+0x4f09b2 && out && in)
+        markers::on_project(eyeSign,draws.load(),in,out);
+    else if((ra==imageBase+0x8cdbdc || ra==imageBase+0x8cdd32) && out && in)
+        label_fix(in,out); // LABELFIX
+    return r;
 }
 struct Seam { W rva; const char* prefix; unsigned relocation; void* detour; void** original; };
 bool signature(const Seam& seam) {
@@ -553,10 +635,27 @@ void settings_save() {
     float pw=0,pd=0; vr::get_panel_size(&pw,&pd);
     put(path,L"screens",L"panel_width",pw); put(path,L"screens",L"panel_distance",pd);
     put_int(path,L"stereo",L"afw",afw::on() ? 1 : 0); put_int(path,L"stereo",L"afw_mode",afw::mode());
+    put_int(path,L"hud",L"labels_point_at_target",labelFix.load() ? 1 : 0); // LABELFIX
+    put_int(path,L"hud",L"detective_overlay_fused",detective::enabled() ? 1 : 0); // DETVR2
+    {   // MARKEREYE (OM1): markers.cpp's own key=value lines go into [markers]
+        std::string s; markers::settings_write(s);
+        size_t a=0;
+        while(a<s.size()) {
+            size_t b=s.find('\n',a); if(b==std::string::npos) b=s.size();
+            const std::string line=s.substr(a,b-a); a=b+1;
+            const size_t eq=line.find('='); if(eq==std::string::npos) continue;
+            wchar_t k[64]{},v[64]{};
+            MultiByteToWideChar(CP_UTF8,0,line.substr(0,eq).c_str(),-1,k,64);
+            MultiByteToWideChar(CP_UTF8,0,line.substr(eq+1).c_str(),-1,v,64);
+            WritePrivateProfileStringW(L"markers",k,v,path);
+        }
+    }
 }
 void settings_load_panel(const wchar_t* path) {
     vr::set_hud_head_locked(GetPrivateProfileIntW(L"hud",L"on_head",vr::hud_head_locked() ? 1 : 0,path)!=0);
     hudAim.store(GetPrivateProfileIntW(L"hud",L"on_head_aiming",1,path)!=0);
+    labelFix.store(GetPrivateProfileIntW(L"hud",L"labels_point_at_target",1,path)!=0); // LABELFIX
+    detective::set_enabled(GetPrivateProfileIntW(L"hud",L"detective_overlay_fused",1,path)!=0); // DETVR2
     float md=0,mw=0; vr::get_hud_menu_quad(&md,&mw);
     md=get(path,L"hud",L"menu_distance",md); mw=get(path,L"hud",L"menu_width",mw);
     if(md>=.5f && md<=10 && mw>=.5f && mw<=10) vr::set_hud_menu_quad(md,mw);
@@ -572,6 +671,13 @@ void settings_load_panel(const wchar_t* path) {
     char a[16]{}; WideCharToMultiByte(CP_ACP,0,v,-1,a,16,nullptr,nullptr); afw::settings_read("afw",a);
     swprintf_s(v,L"%d",GetPrivateProfileIntW(L"stereo",L"afw_mode",afw::mode(),path));
     WideCharToMultiByte(CP_ACP,0,v,-1,a,16,nullptr,nullptr); afw::settings_read("afw_mode",a);
+    {   // MARKEREYE (OM1): [markers]
+        static wchar_t sec[4096]; const DWORD n=GetPrivateProfileSectionW(L"markers",sec,4096,path);
+        for(const wchar_t* p=sec; p<sec+n && *p; p+=wcslen(p)+1) {
+            char line[160]{}; WideCharToMultiByte(CP_UTF8,0,p,-1,line,160,nullptr,nullptr);
+            if(char* eq=strchr(line,'=')) { *eq=0; markers::settings_read(line,eq+1); }
+        }
+    }
 }
 // PAUSEDIRT (JJ 2026-10-26: "there is a dirt layer HUD element that's stuck to your face that should probably be removed from the
 // pause menu"): City's grime pass (batman_city room_overlay.cpp on_pause_dirt: full-screen Draw(3), t0 4x4, t1 the fp16 scene copy
@@ -596,9 +702,11 @@ bool tex_desc(ID3D11ShaderResourceView* v,D3D11_TEXTURE2D_DESC* d) {
     if(ok) { t->GetDesc(d); t->Release(); }
     r->Release(); return ok;
 }
+void draw_after_plain(ID3D11DeviceContext* ctx) { detective::after_draw(ctx); flare_roll::after_draw(ctx); } // DETVR + FLAREROLL
 bool pause_draw_skip(ID3D11DeviceContext* ctx,unsigned vertexCount) {
     if(flare_roll::before_draw(ctx,vertexCount)) return true; // FLAREROLL: flare pieces drawn level (dropped only by its TESTS hide switch)
     aim_depth::before_draw(ctx,vertexCount); // AIMDEPTH: at the tone-map step (never drops the draw)
+    detective::before_draw(ctx,vertexCount); // DETVR: records / swaps the detective screen material (never drops the draw)
     if(vertexCount!=3 || !menu_state::menu_open() || menu_state::screen_menu_open()) return false;
     ID3D11ShaderResourceView* srvs[4]{}; ctx->PSGetShaderResources(0,4,srvs);
     D3D11_TEXTURE2D_DESC t[4]{}; bool has[4]{};
@@ -661,9 +769,18 @@ bool install() {
         BVR_LOG("[bo] engine hook batch failed; screen only"); return false;
     }
     installed.store(true);
+    {   // MARKEREYE (OM1): optional, its own guard
+        const Seam proj{0x5bb7c0,"8b442408f30f1020f30f106804f30f10",0,reinterpret_cast<void*>(proj_detour),reinterpret_cast<void**>(&projOriginal)};
+        auto* target=reinterpret_cast<void*>(imageBase+proj.rva);
+        if(signature(proj) && MH_CreateHook(target,proj.detour,proj.original)==MH_OK && MH_EnableHook(target)==MH_OK) {
+            gfx_hud::set_marker_fn(&markers::on_hud_draw,&markers::after_hud_draw);
+            frame_inspector::set_cb_shadow(true); // MARKEREYE reads each HUD piece's placement
+            BVR_LOG("[bo] MARKEREYE: Canvas.Project hooked (RVA 0x5BB7C0) - grapple markers go onto their objects");
+        } else BVR_LOG("[bo] MARKEREYE: the projection guard failed - markers stay on the HUD panel");
+    }
     frame_inspector::set_draw_skip(&pause_draw_skip); // PAUSEDIRT
     frame_inspector::set_copy_tap(&flare_roll::on_copy); // FLAREROLL: copies of level pictures stay level
-    frame_inspector::set_draw_after(&flare_roll::after_draw); // FLAREROLL DEPTHOFF: a detached depth buffer goes back
+    frame_inspector::set_draw_after(&draw_after_plain); // FLAREROLL DEPTHOFF: a detached depth buffer goes back; DETVR: the game's shader back
     frame_inspector::set_draw_indexed_hook(&flare_roll::before_draw_indexed); // PIECECENSUS: indexed glow draws
     frame_inspector::set_draw_indexed_after(&flare_roll::after_draw);
     reflect::install(imageBase); // optional: its own guard; a mismatch leaves stereo unaffected
@@ -703,6 +820,7 @@ bool install() {
     resolutionScale.store(float(std::clamp(wcstod(text,nullptr),.6,1.8)));
     settings_load_panel(settings);
     flare_roll::install(); // FLARESPRITE: note every vertex shader the game creates (before its device exists)
+    detective::install();  // DETVR: record the detective screen shader candidates (before the game's device exists)
     flare_roll::settings_load(settings);
     first_person::install(imageBase,settings);
     const wchar_t* cmd=GetCommandLineW();
@@ -924,6 +1042,16 @@ void draw_ui() {
         bool mc=overlay::SliderStep("pause / map screen distance (m)",&md,0.5f,8.0f,"%.2f");
         mc|=overlay::SliderStep("pause / map screen size (degrees)",&mdeg,30.0f,120.0f,"%.0f");
         if(mc) { vr::set_hud_menu_quad(md,2.0f*md*std::tan(0.5f*mdeg*kPi/180.0f)); settings_save(); }
+        {   // MARKEREYE (OM1): the grapple markers on their objects (City's markers drawer)
+            std::string before; markers::settings_write(before);
+            markers::draw_ui();
+            bool lf=labelFix.load(); // LABELFIX
+            if(ImGui::Checkbox("labels point at their target (enemy info, detective vitals)",&lf)) { labelFix.store(lf); before.clear(); }
+            if(detective::draw_ui()) before.clear(); // DETVR2
+            if(overlay::show_tests()) ImGui::TextDisabled("   labels placed on the HUD panel %u, left as the game drew them %u",labelFixed.load(),labelKept.load());
+            std::string after; markers::settings_write(after);
+            if(after!=before) settings_save();
+        }
     }
     ImGui::SetNextItemOpen(false,ImGuiCond_Once);
     if(ImGui::CollapsingHeader("MENUS AND SCREENS")) {

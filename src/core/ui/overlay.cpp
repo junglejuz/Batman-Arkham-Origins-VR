@@ -75,7 +75,7 @@ bool ensure_panel() {
 using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
 XInputGetStateFn g_xiGetState = nullptr;
 std::atomic<ChordTapFn> g_chordDoubleTap{nullptr};
-bool pad_chord_down() {
+bool pad_chord_down(bool* leftOut = nullptr, bool* rightOut = nullptr) {
     if (!g_xiGetState) {
         static bool tried = false;
         if (tried) return false;
@@ -90,6 +90,8 @@ bool pad_chord_down() {
     input::set_menu_poll(false);
     if (r != ERROR_SUCCESS) return false;
     const WORD both = XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB;
+    if (leftOut) *leftOut = (s.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
+    if (rightOut) *rightOut = (s.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0;
     return (s.Gamepad.wButtons & both) == both;
 }
 
@@ -320,9 +322,19 @@ void on_present(IDXGISwapChain* swapchain) {
     {
         static ULONGLONG chordSince = 0, lastTap = 0;
         static bool chordFired = false;
+        // STICKTAP (JJ 2026-10-28, Origins: "Why is the right stick making Batman third person disappear? His shadow is still there";
+        // LIVE 00:46:00-00:46:09: "first person ON / off" four times): a tap counted whenever both stick buttons were down, also
+        // with one of them already held (the left stick pressed in while running) - then two right-stick clicks switched first
+        // person. A tap now counts only when both sticks went down within 150 ms of each other; each tap / refusal is logged.
+        static ULONGLONG leftAt = 0, rightAt = 0, chordSkew = 0;
+        static unsigned tapLogs = 0;
         const ULONGLONG now = GetTickCount64();
-        if (pad_chord_down()) {
-            if (!chordSince) chordSince = now;
+        bool thumbL = false, thumbR = false;
+        const bool chordNow = pad_chord_down(&thumbL, &thumbR);
+        if (thumbL) { if (!leftAt) leftAt = now; } else leftAt = 0;
+        if (thumbR) { if (!rightAt) rightAt = now; } else rightAt = 0;
+        if (chordNow) {
+            if (!chordSince) { chordSince = now; chordSkew = leftAt > rightAt ? leftAt - rightAt : rightAt - leftAt; }
             if (!chordFired && now - chordSince >= 600) {
                 chordFired = true;
                 g_visible = !g_visible;
@@ -331,7 +343,13 @@ void on_present(IDXGISwapChain* swapchain) {
         } else {
             // Batman City FIRSTPERSON (JJ 2026-10-09): two quick clicks of both sticks (each under 0.35 s, the second
             // within 0.6 s of the first) = the double-tap action; the 0.6 s hold stays the menu.
-            if (chordSince && !chordFired && now - chordSince < 350) {
+            if (chordSince && !chordFired && now - chordSince < 350 && chordSkew >= 150) {
+                if (tapLogs++ < 20)
+                    BVR_LOG("overlay: stick tap ignored - one stick was already held %llu ms before the other", chordSkew);
+                lastTap = 0;
+            } else if (chordSince && !chordFired && now - chordSince < 350) {
+                if (tapLogs++ < 20)
+                    BVR_LOG("overlay: both-sticks tap (pressed %llu ms apart)%s", chordSkew, lastTap && now - lastTap < 600 ? " - second tap" : "");
                 if (lastTap && now - lastTap < 600) {
                     lastTap = 0;
                     if (ChordTapFn f = g_chordDoubleTap.load()) f();

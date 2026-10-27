@@ -1,3 +1,164 @@
+## RELEASE 0.1.6 (2026-10-28, JJ: "go ahead with packaging these up for GitHub, updating the release notes, providing me with a
+## shortened version of the release notes for each of the Discord channels")
+SCREENMARK test code removed (its job is done: it named the scanner material). Version 0.1.6 (CMake + make_package), build id
+Origins-release-0.1.6; built in build (Release), 4/4 checks; INSTALLED (batman_origins.dll 6C7C25EA, manifest updated, 0 mismatches;
+previous DLL + manifest in backups/pre-0.1.6-2026-10-28). Contents since 0.1.5: OM1 grapple points where you look + markers on
+objects (LOOKSTEER / MARKERSTEER / MARKERLAG / MARKERPIN), LABELFIX, DETVR2, SCANVR, SCANHUD, ZOOMFOLLOW, STICKTAP. HEADSET (JJ):
+OM1, DETVR2, SCANVR, SCANHUD, ZOOMFOLLOW; LABELFIX ran in the log (headset look pending); STICKTAP not separately checked. README:
+grapple-look, labels, detective / scanner lines. Zip sha256 b2dc742a68952b1a30239519abcb252416df836ff3ee184b08902f85bafd1a6c.
+
+## ZOOMFOLLOW (2026-10-28, JJ: "No, I think you misunderstand me. I am just clicking the right stick on its own, and it's not changing
+## the camera position, but Batman is just disappearing. I was also testing it by double-clicking the first person mode")
+STICKTAP's reading was wrong: the 00:46 first-person toggles were JJ's deliberate comparison. STATIC: BmInput.ini / DefaultInput.ini -
+XboxTypeS_RightThumbstick = "... ToggleCameraZoom | GadgetThumbRight ..." = the game's close camera; the game hides Batman when its
+camera is that close (shadow stays). Cause (SOURCE): LOOKSTEER's third-person boom hold keeps the camera's offset whenever the steered
+camera is > 5 deg from the body - it also froze the game's zoom, so the view stayed while Batman vanished. Fix (first_person.cpp):
+the hold steps aside while the game camera is < 1.1 m from his eye point or its lens is > 12 % narrower than its usual (widest recent)
+one; log "ZOOMFOLLOW" with distance / lens. Built, 4/4, installed batman_origins.dll 6A326FD9 (previous in
+backups/pre-ZOOMFOLLOW-2026-10-28). STICKTAP kept (harmless: a real simultaneous both-stick tap still works). City has the same hold
+(LOOKSTEER) - check R3 there. Open: "inside his mouth" in first person (JJ's comparison) - not investigated yet.
+
+## STICKTAP (2026-10-28, JJ: "Why is the right stick making Batman third person disappear? His shadow is still there. And then when I
+## click it again, I end up with Batman back, but I'm inside his mouth" / "it's not a first-person mode")
+LIVE 00:46:00 / :03 / :05 / :09: "first person ON / off" x4 at JJ's clicks = the mod's first person (view at his eyes: no Batman, his
+shadow on the ground). Cause (SOURCE, overlay.cpp): the both-sticks double tap counted any moment both stick buttons were down, also
+with one already held (left stick pressed in while running) - two right-stick clicks then toggled first person. Fix: a tap counts only
+if both went down within 150 ms; taps / refusals logged ("overlay: both-sticks tap" / "stick tap ignored"). Built, 4/4, installed
+batman_origins.dll 931F2254 (previous in backups/pre-STICKTAP-2026-10-28). City / Asylum / Knight share the same overlay code - port if
+JJ meets it there. "Inside his mouth" = first person after the toggle; check later whether it is also seen with a deliberate switch.
+
+## SCANHUD (2026-10-28, JJ: SCANVR "much better, but ... the head tracking in the evidence mode only works when you hold down left
+## trigger")
+LIVE 00:33: look steering active from 00:33:08 through the scanner (00:33:27-00:33:45, no mode change logged) = the scan direction
+followed the head; the scanner's centre target is HUD, and the HUD rode the head only with the trigger (HUDAIM). SOURCE: detective.cpp
+notes the scanner material's last draw; scene.cpp HUDAIM also while it was drawn in the last 300 ms. Built, 4/4, installed
+batman_origins.dll 125D70A8 (previous in backups/pre-SCANHUD-2026-10-28). HEADSET pending: scanner without the trigger - the scan target
+follows the head; leaving the scanner puts the HUD back in the room.
+
+## SCANVR (2026-10-28, JJ after SM1: "When moving your head around in evidence mode, not much seems to move besides what looks like
+## some sort of scan line overlay which seems to be attached to your face but it's a bit hard to tell with the vignette there")
+SM1 RESULTS (LIVE 00:26): SCREENMARK normal = 9 materials; scanner = the same 9 + 13572b59fe76fadf (5 pictures, cb0[10], cb2[6]).
+Disassembly: the detective material's cousin - t1 scene, t2 honeycomb + vignette at uv x2, t3 scan lines (.z) at (uv.x, uv.y x 24), t4
+grain at uv x4 + cb0[8].zw, grade c0[9].xyz, final x cb2[4].w + cb2[4].xyz. Captures 25572765 / 25600062: the scanner view is a
+first-person stereo view, two head directions - the view is head-tracked; JJ's "attached to your face" = this overlay.
+SOURCE (detective.cpp SCANVR; HLSL checked with fxc: CB0[10], CB2[6], t0-t4, + CB4; built, no warnings, 4/4; installed
+batman_origins.dll A54A3681, manifest checked; previous in backups/pre-SCANVR-2026-10-28): the scanner material recorded and swapped for
+its rebuild (overlays at the shared position), under the same setting, now "detective and evidence scanner overlays fused for both
+eyes (one vignette)". Open question to JJ: "use head tracking" in the scanner = the view (already tracked) or WHAT is scanned
+(the game's centre target) following the head (LOOKSTEER-style steering)?
+
+## SCREENMARK - evidence scanner (2026-10-28, JJ: "The evidence scanner has the vignette that doesn't fuse, also same issue as the
+## detective scanner. And it would be good if the evidence scanner had used head tracking")
+
+LIVE (00:06-00:08 run, DETVR2 installed): no complaint about detective mode itself in this report. While the scanner was up (~00:07:25)
+FLIPWATCH logged views 3 and 4 of each pose generation (two extra scene views per frame; game camera pitch fixed -11, view pitch =
+game + head, i.e. head applied to those views) - which picture JJ sees in the scanner and why it feels head-locked is not known yet.
+The 23:57:57 candidate 3c05185aeabc50a2 = the pause-menu grime pass (PAUSEDIRT), not the scanner. The scanner's material was never
+recorded (DETVR's recorder only kept detective-signature shaders, then only 6630ccfd...).
+SOURCE (detective.cpp SCREENMARK; built, no warnings, 4/4; installed batman_origins.dll 899D1A5F, manifest checked; previous in
+backups/pre-SCREENMARK-2026-10-28): every pixel shader's bytecode kept; every full-screen Draw(3) noted; TESTS "Mark: I am in the
+EVIDENCE SCANNER now" / "Mark: normal play now" log the full-screen materials drawn in the last 1.5 s ("SCREENMARK") and save their
+bytecode to %LOCALAPPDATA%\Batman_Origins\screens\<label>_<checksum>.dxbc.
+### TEST PLAN SM1 (one launch, JJ drives)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | normal play: panel TESTS -> "Mark: normal play now" | baseline list | SCREENMARK normal lines |
+| 2 | open the evidence scanner, panel TESTS -> "Mark: I am in the EVIDENCE SCANNER now" | the scanner's material | materials only in the scanner list |
+| 3 | still in the scanner: F2 / capture; turn the head left / right, up / down - say what moves | head tracking in the scanner | capture: which view is shown; JJ's words |
+Follow-ups: the scanner material -> disassemble, rebuild with its overlay at the shared position (DETVR method); head tracking ->
+from the capture and FLIPWATCH: the shown picture is the extra view pair (views 3 / 4) or a flat copy -> treat it like the main view.
+
+## DETVR2 (2026-10-28, JJ: City's detective fix "works, but it breaks something when first entering detective mode ... it's
+## splitting the screen into four quadrants very briefly ... The same thing happens when exiting ... detective mode seems to have this
+## strange vertical banding in the object border highlights that slowly moves from right to left ... I don't think it's fusing")
+
+LIVE 23:54-23:57: 20 pixel shaders with City's detective inputs recorded (%LOCALAPPDATA%\Batman_Origins\detective\*.dxbc); drawn
+full-screen: 611c06c683aff775 (6 pictures, cb0[4] - the enter / exit effect), 6630ccfd39543ce7 (7 pictures, cb0[15], cb2[6]),
+3c05185aeabc50a2; ba7ead25fc6f344f = our own compiled rebuild (CB4). The TESTS swap put City's material on EVERY drawn candidate =
+the quadrants. LABELFIX ran (6 log lines: left / right game points differ, panel points identical per target).
+STATIC (fxc /dumpbin): 6630ccfd39543ce7 = City's 9f1079e5fc4a7d14 + flag at cb2[5].x (City c2[4].x) + a final r0 * cb2[4].w +
+cb2[4].xyz; the border-stripe picture t6 is sampled at x = the eye's own screen u + c0[3].x (scroll) = per-eye, crawling bands (City's
+material and rebuild do the same).
+SOURCE (detective.cpp; built, no warnings, 4/4; HLSL checked with fxc: CB0[15], CB2[6], + CB4): only 6630ccfd39543ce7 is recorded and
+swapped; Origins' own rebuild; t6 sampled at the shared overlay x as well. Setting HUD drawer "detective overlay fused for both eyes
+(one vignette)" ([hud] detective_overlay_fused, default 1). Install queued until the game exits (previous in
+backups/pre-DETVR2-2026-10-28). Test: enter / leave detective mode (no quadrants), border highlights (no crawling bands, fused),
+one vignette. City: its rebuild has the same per-eye t6 stripes - not changed yet (JJ accepted City's look).
+
+## LABELFIX + DETVR census (2026-10-27 night, JJ after OM1: "That seems to work, but the pointers that are attached to world objects
+## like enemies and show information about them or labels on the HUD are not fixed to what they should be pointing to. We had the same
+## issue in Arkham Asylum and we fixed it ... the vital stats ... also in detective mode, there seems to be a vignette around each eye
+## independently"; then "Also check if Arkham City has this label issue")
+
+OM1 HEADSET (JJ): grapple points where you look + markers on objects "seems to work".
+Looked up: batman_asylum BUILD_PLAN / RE_NOTES A2f (JJ "Looks great": correct the native actor-callout projection's XY to where the
+head-centre-to-target line meets the HUD plane, before the game builds the label; z / w kept) and markers9.cpp plane_target; memory
+detective-overlay-fused + batman_city vision.cpp DETVR (rebuilt detective material, overlays sampled in the union frustum).
+STATIC: the 8 Origins calls of the projection 0x9BB7C0; 0xCCDBD7 (return RVA 0x8CDBDC) = Asylum 0x158A366's shape (canvas view +0x64,
+comiss 1.0 vs z, 0.5, push actor, call 0xCBEB70 = Asylum 0x155DC20); the same function's 0xCCDD2D (return RVA 0x8CDD32) projects the
+same targets for a centre-distance test then halves x / y. City: 0xC57D0E (return 0xC57D13) in the HUD marker gatherer has the same
+shape (comiss 1.0, push esi, call 0xC1E580, x * 0.5, -y * 0.5) = City has the same label issue.
+Detective shader: the SM5 RefShaderCache .upk files are compressed (raw "DXBC" hits are noise) - Origins' material needs a live record.
+SOURCE (built, no warnings, 4/4 checks; installed batman_origins.dll 095076EE, manifest re-checked 0 mismatches; previous in
+backups/pre-LABELFIX-2026-10-27; City batman_city.dll 7A9BF76D, previous 47FDA765 in batman_city/backups/pre-LABELFIX-2026-10-27):
+- Runtime (both cores): publish_hud_plane / get_hud_plane - the room-fixed HUD quad's corners in tracking space each composed frame
+  (not while it rides the head or shows a menu; stale after 200 ms).
+- LABELFIX (Origins proj_detour on 0x8CDBDC / 0x8CDD32; City view_proj_detour on 0xC57D13): target -> the pass's drawn camera view
+  space / world scale, z flipped = recentred XR; HUD corners through the same recentre; out XY = Asylum plane_target from the head
+  centre (Origins: eye midpoint; City: head pose if position tracking is on). Both eyes identical; z / w kept; behind / off-screen /
+  no plane = the game's value. Origins panel HUD drawer "labels point at their target (enemy info, detective vitals)"
+  (hud labels_point_at_target, default 1) + TESTS counters; City: always on (g_labelFix), log "[bc] LABELFIX".
+- DETVR census (Origins detective.cpp): CreatePixelShader hooked from a throwaway device; every shader with City's detective inputs
+  (COLOR0, TEXCOORD0/4/6/5, SV_IsFrontFace) is saved to %LOCALAPPDATA%\<Origins>\detective\<checksum>.dxbc and logged ("DETVR
+  candidate", "IDENTICAL to City's material" if so); a candidate drawn full-screen logs "is DRAWN". TESTS: "detective overlay with
+  Batman City's fix" swaps City's rebuild onto the candidates (not saved).
+### TEST PLAN LF1 (one launch each game, JJ drives)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | Origins: detective mode near thugs (vitals), normal mode near enemies with labels; turn the head | LABELFIX | lines / circles end on their person from your view, both eyes agree; log "LABELFIX" lines |
+| 2 | Origins: detective mode on for a few seconds | DETVR census | log "DETVR candidate ... saved", "is DRAWN" |
+| 3 | Origins TESTS: tick "detective overlay with Batman City's fix" in detective mode | City's rebuild fits? | one vignette fused; untick = per-eye again; if the picture breaks, untick |
+| 4 | City: detective mode near thugs, enemy labels | LABELFIX City | same as 1; log "[bc] LABELFIX" |
+Follow-ups: 3 breaks -> disassemble the saved .dxbc (fxc /dumpbin), rebuild Origins' own material like City's re/detvr.hlsl; 1
+labels still off by a constant -> the HUD panel shape vs the sheet (log the plane / xy).
+
+## OM1 - grapple markers on their objects + grapple points where you look (2026-10-27 night, JJ after Batman City 0.1.5: "we can
+## then do that exact same process with the grapple points being visible when you look around in all the other three Batman games.
+## Starting with origins"; JJ chose "Markers on objects" over "HUD follows your head")
+
+Looked up: batman_city BATMAN_CITY_PLAN HEADAIM2 .. MARKERPIN + RELEASE 0.1.5 (the City method and what failed there: camera view-record
+writes, camera-facing writes in the draw or between frames - the latter spins the camera); City markers.cpp (MARKEREYE / MARKERBASE /
+MARKERCARD / MARKERUPRIGHT / MARKERFACE / MARKERLAG / MARKERPIN); VR_WORLD_MARKERS_GUIDE (MARKERBASE, MARKERCARD); memory
+origins-port-city-fixes-by-code-shape; this file's AIMSTATE / AIM3P. Origins had the core marker hook (gfx_hud::set_marker_fn) but
+never an adapter: its grapple markers were flat on the HUD panel.
+STATIC (BatmanOrigins.exe, sha 1c373ed6...): City's UCanvas::execProject byte shape (0x8FDFA7..: xorps / mov ecx,[edi+64] / three
+movss / test / je / two lea+push / call) has ONE match in Origins at 0x8F0987: canvas SceneView +0x64, call -> FSceneView project
+0x9BB7C0 (RVA 0x5BB7C0; thiscall out, in; ret 8; reads view +0x250.. like City 0x972FB0; out = x/w, y/w, z/w, w), return address
+0x8F09B2 (RVA 0x4F09B2) = the Canvas.Project caller.
+SOURCE (built, no warnings, 4/4 checks; installed batman_origins.dll 02AE77D8, manifest updated and every entry re-checked; previous
+dll + manifest in backups/pre-OM1-2026-10-27):
+- markers.cpp/.h: City's file, namespace bo, "[bo]" log prefix. Sharp-reticle swap off (no files), City's aim-reticle depth path off
+  (Origins keeps HUDAIM2 + aim_depth.cpp). Marker pictures: City's fingerprint list does not apply - a piece within 0.05 NDC of its
+  projected point anchors a run (anchor_piece); every new anchor texture logs "[bo] marker anchor picture: key ..." for a real list.
+- scene.cpp: optional projection hook (own guard; log "MARKEREYE: Canvas.Project hooked" / "guard failed - markers stay on the HUD
+  panel") -> markers::on_project; render slot at BeginDrawing; per pass set_pass(slot, eye, draws, this eye's VP, reference VP =
+  the GAME camera's rotation (MARKERSTEER) at the drawn position x this eye's unjittered lens made symmetric); gfx_hud marker
+  callback + cb shadow; settings [markers] (markers.cpp key=value lines); panel HUD drawer -> markers::draw_ui.
+- first_person.cpp LOOKSTEER (City): "grapple points appear where you look" (look_targets, default 1) steers the controller pitch
+  while the trigger is up, "also left / right" (look_targets_yaw, default 1 as City ships) the yaw too; state_drive(full, yawToo):
+  AIMDEPTH only when aiming; the stick's up / down kept while it is pushed (+-70 deg); third person holds the boom offset sampled
+  within 5 deg of the body. Panel: both views, under FIRST PERSON.
+### TEST PLAN OM1 (one launch, JJ drives)
+| # | JJ does | what it proves | how to judge |
+|---|---|---|---|
+| 1 | load a save (third person), walk / turn | hooks live | log "MARKEREYE: Canvas.Project hooked", "head look steering" |
+| 2 | look up / around at grapple points with the head only | LOOKSTEER | markers appear where he looks; view steady |
+| 3 | same | MARKEREYE | markers sit ON the object at its depth (both eyes), face him, normal size, no jitter at a ledge's end |
+| 4 | LT aim, batclaw / batarang | aiming unchanged | lands where aimed; reticle as in 0.1.5 |
+| 5 | location titles / prompts near a grapple point; compass | run rule | nothing else pulled off the HUD panel |
+Follow-ups: 3 markers stay flat on the panel -> no anchor (log "marker anchor picture" absent): raise kAnchorReach or census the
+pieces (huddump); wrong pieces ride along -> name the anchor keys from the log in kReticleKeys (City RETICLERUN).
+
 ## RELEASE 0.1.5 (2026-10-27 night, JJ: "Remove the unnecessary things from the VR panel, including the lens flare stuff deploy to GitHub
 ## and update the release notes")
 

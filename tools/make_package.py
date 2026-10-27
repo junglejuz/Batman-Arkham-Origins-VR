@@ -9,7 +9,7 @@ import argparse, hashlib, os, re, shutil, sys, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-VERSION = '0.1.5'
+VERSION = '0.1.6'
 ap = argparse.ArgumentParser()
 ap.add_argument('--settings', default=os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Batman_Origins', 'settings.ini'))
 a = ap.parse_args()

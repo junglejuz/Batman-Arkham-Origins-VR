@@ -16,6 +16,8 @@ void update(void* localPlayer, const char* blocked);
 void apply(float view[4][4], float unitsPerMetre, const float headQ[4], bool firstEye, bool lastEye);
 // AIMTRIGGER: the left trigger is held (or was within 0.3 s) - HEADAIM and HUDAIM.
 bool left_trigger_now();
+// ZOOMFOLLOW: the game's own lens of this pass (projection [0][0], before the headset lens replaces it)
+void note_game_lens(float m00);
 // LEANBACK: the final eye's world origin (headset movement included); pushed forward along the look if leaning back would bring it
 // nearer than the set distance to his head. True = moved.
 bool clamp_eye(float origin[3], float unitsPerMetre);

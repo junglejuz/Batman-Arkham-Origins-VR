@@ -167,6 +167,31 @@ std::atomic<bool> lookAim3p{true};
 float tpBody[3][3] = {}; float tpPos[3] = {}; bool tpComp = false; ULONGLONG tpCompUntil = 0;
 std::atomic<unsigned> tpPairs{0};
 bool pairAimed = false; float pairBody[3][3] = {};                                // this pair's body basis (both eyes)
+// LOOKSTEER (Batman City 0.1.5, JJ 2026-10-27 night: grapple points visible where you look, "that exact same process ... in all the
+// other three Batman games. Starting with origins"): the game picks grapple points from its CAMERA, and the camera follows the
+// controller. So while the left trigger is up the head steers the controller's pitch (yaw too with "also left / right": the stick then
+// walks him where he looks), drawn from the body basis like AIMSTATE so the view never moves. Markers: markers.cpp (MARKERSTEER
+// reference = the steered camera, MARKERLAG, MARKERPIN). The stick's own up / down stays while steering (taken only while the stick is
+// pushed up / down, so the game's pitch limit never drifts the body - City PADSEEN / LOOKSTEER).
+std::atomic<bool> lookTargets{true}, lookYaw{false};
+bool pairFull = false;                // this pair steers for aiming (trigger)
+Rot stLast{};                         // the look last written into the controller
+// Third person: the game camera's boom changes with its pitch (looking up brings it down toward the ground). Its offset from his eye
+// point, in its own frame, is sampled only while the steered camera is within 5 deg of the body basis and held while the head looks
+// elsewhere - the view does not move when the head looks up.
+float tpOffset[3] = {}; bool tpOffsetValid = false;
+// ZOOMFOLLOW (JJ 2026-10-28: "I am just clicking the right stick on its own, and it's not changing the camera position, but Batman is
+// just disappearing"; BmInput.ini: right-stick click = ToggleCameraZoom): the game pulls its camera in close (and hides Batman, his
+// shadow stays), but the boom hold above kept the old distance whenever the head looked away from the stick's direction. The hold
+// now steps aside while the game's camera is close to his eye point or its lens is narrower than its usual one (a zoom).
+float gameM00 = 0.0f, normalM00 = 0.0f;  // the game's lens (projection [0][0]) this pass / its usual, widest recent one
+bool zoomFollow = false;
+unsigned zoomLogs = 0;
+bool stick_pitch_pushed() {
+    int16_t rx = 0, ry = 0;
+    input::last_composed_sticks(nullptr, nullptr, &rx, &ry);
+    return ry > 6500 || ry < -6500;
+}
 void aim_watch_start(uintptr_t pc); // AIMWATCH (below)
 void state_release(const char* why) {
     if (!stActive) return;
@@ -178,14 +203,20 @@ void state_release(const char* why) {
     stActive = false; stPc = 0; stYawOffset = 0;
 }
 // First eye of a pair: steer the controller to the head's look; true = this pair renders from pairBody.
-bool state_drive(uintptr_t pc, const float headQ[4]) {
+// full = aiming (left trigger): yaw too, through the looked-at point. LOOKSTEER: pitch only, or yaw too when chosen.
+bool state_drive(uintptr_t pc, const float headQ[4], bool full, bool yawToo) {
     if (stActive && stPc != pc) state_release("controller changed");
     for (int i = 0; i < 4; ++i) if (!std::isfinite(headQ[i])) return false;
     Rot cur{};
     if (!read_rot(pc + kCtrlRotation, cur)) { state_release("controller unreadable"); return false; }
     Rot body = cur;
-    if (stActive) body.yaw = wrapU(int64_t(cur.yaw) - stYawOffset); // stick turns since the last pair stay
-    else stPitch = wrapU(cur.pitch);
+    if (stActive) {
+        body.yaw = wrapU(int64_t(cur.yaw) - stYawOffset); // stick turns since the last pair stay
+        if (stick_pitch_pushed()) {                       // LOOKSTEER: the stick's own up / down
+            const int32_t p = wrapU(int64_t(stPitch) + wrapU(int64_t(cur.pitch) - stLast.pitch));
+            stPitch = p > 12743 ? 12743 : p < -12743 ? -12743 : p; // +-70 deg
+        }
+    } else stPitch = wrapU(cur.pitch);
     body.pitch = stPitch;
     body.roll = 0;
     float B[3][3], D[3][3], f[3] = {};
@@ -193,13 +224,14 @@ bool state_drive(uintptr_t pc, const float headQ[4]) {
     for (int i = 0; i < 3; ++i) for (int k = 0; k < 3; ++k) f[i] += B[i][k] * D[k][2]; // forward = column 2 of B x D
     Rot look = look_rot(f);
     float P[3];
-    if (aim_depth::point(P)) { // AIMDEPTH: from the game camera through the looked-at point
+    if (!full) {}
+    else if (aim_depth::point(P)) { // AIMDEPTH: from the game camera through the looked-at point
         const float d[3] = {P[0] - pairGameO[0], P[1] - pairGameO[1], P[2] - pairGameO[2]};
         const float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
         if (len > 100.0f && d[0] * f[0] + d[1] * f[1] + d[2] * f[2] > 0.9f * len) { look = look_rot(d); depthAims.fetch_add(1, std::memory_order_relaxed); }
         else plainAims.fetch_add(1, std::memory_order_relaxed);
     } else plainAims.fetch_add(1, std::memory_order_relaxed);
-    Rot target = cur; target.yaw = look.yaw; target.pitch = look.pitch;
+    Rot target = cur; target.yaw = full || yawToo ? look.yaw : body.yaw; target.pitch = look.pitch;
     Rot back{};
     if (!write_rot(pc + kCtrlRotation, target) || !read_rot(pc + kCtrlRotation, back) || back.yaw != target.yaw || back.pitch != target.pitch) {
         aimFailures.fetch_add(1, std::memory_order_relaxed);
@@ -207,7 +239,16 @@ bool state_drive(uintptr_t pc, const float headQ[4]) {
         state_release("write failed");
         return false;
     }
-    if (!stActive) BVR_LOG("[bo] head aim active: Batman's controller follows your look (controller %08X, body pitch %d)", unsigned(pc), stPitch);
+    static int s_mode = 0, s_modeLogs = 0; // 1 aiming, 2 looking (LOOKSTEER)
+    if (!stActive) s_mode = 0;
+    if (s_mode != (full ? 1 : 2) && s_modeLogs < 40) {
+        ++s_modeLogs;
+        if (full) BVR_LOG("[bo] head aim active: Batman's controller follows your look (controller %08X, body pitch %d)", unsigned(pc), stPitch);
+        else BVR_LOG("[bo] head look steering: the game camera follows your head %s (grapple points), drawn from the stick's view",
+                     yawToo ? "up / down and left / right" : "up / down");
+    }
+    s_mode = full ? 1 : 2;
+    stLast = target;
     stYawOffset = wrapU(int64_t(target.yaw) - body.yaw);
     stTarget = target;
     stActive = true; stPc = pc;
@@ -445,6 +486,8 @@ void save() {
     WritePrivateProfileStringW(L"first_person", L"look_aim", lookAim.load() ? L"1" : L"0", settings);
     WritePrivateProfileStringW(L"first_person", L"look_aim_3p", lookAim3p.load() ? L"1" : L"0", settings);
     WritePrivateProfileStringW(L"first_person", L"look_aim_trigger", aimMode.load() == 1 ? L"1" : L"0", settings);
+    WritePrivateProfileStringW(L"first_person", L"look_targets", lookTargets.load() ? L"1" : L"0", settings);     // LOOKSTEER
+    WritePrivateProfileStringW(L"first_person", L"look_targets_yaw", lookYaw.load() ? L"1" : L"0", settings);
     swprintf_s(v, L"%.3f", headSmoothS.load()); WritePrivateProfileStringW(L"first_person", L"head_smooth", v, settings);
     swprintf_s(v, L"%.1f", camRightCm.load()); WritePrivateProfileStringW(L"camera_position", L"right_cm", v, settings);
     swprintf_s(v, L"%.1f", camUpCm.load()); WritePrivateProfileStringW(L"camera_position", L"up_cm", v, settings);
@@ -493,6 +536,8 @@ void install(uintptr_t imageBase, const wchar_t* settingsPath) {
     lookAim3p.store(GetPrivateProfileIntW(L"first_person", L"look_aim_3p", 1, settings) != 0);
     aimWatch.store(GetPrivateProfileIntW(L"first_person", L"aim_watch", 0, settings) != 0);
     aimMode.store(GetPrivateProfileIntW(L"first_person", L"look_aim_trigger", 1, settings) != 0 ? 1 : 0);
+    lookTargets.store(GetPrivateProfileIntW(L"first_person", L"look_targets", 1, settings) != 0); // LOOKSTEER
+    lookYaw.store(GetPrivateProfileIntW(L"first_person", L"look_targets_yaw", 1, settings) != 0);
     headSmoothS.store(get(L"head_smooth", 0.08f, 0.0f, 0.5f));
     camRightCm.store(get(L"right_cm", 0.0f, -300.0f, 300.0f, L"camera_position"));
     camUpCm.store(get(L"up_cm", 0.0f, -300.0f, 300.0f, L"camera_position"));
@@ -508,7 +553,8 @@ void update(void* localPlayer, const char* blocked) {
     aimPawnNow = 0;
     if (localPlayer) lastPlayer = reinterpret_cast<uintptr_t>(localPlayer); // AIMFIND
     const bool fp = enabled.load(std::memory_order_relaxed);
-    const bool aim3p = !fp && lookAim.load(std::memory_order_relaxed) && lookAim3p.load(std::memory_order_relaxed);
+    const bool aim3p = !fp && ((lookAim.load(std::memory_order_relaxed) && lookAim3p.load(std::memory_order_relaxed)) ||
+                               lookTargets.load(std::memory_order_relaxed)); // + LOOKSTEER
     if (!fp && !aim3p) state_release("third-person head aim off");
     if ((!fp && !cam_offset_set() && !aim3p) || !localPlayer) return;
     // FPGATE (City, JJ 2026-10-11: "must always be disabled when going into main menu ... or any other loading screen and
@@ -550,10 +596,13 @@ void apply(float view[4][4], float unitsPerMetre, const float headQ[4], bool fir
             for (int i = 0; i < 3; ++i) pairGameO[i] = o[i]; // AIMDEPTH: the game's own camera, the start of its aim
             pairAimed = false;
             const uintptr_t pc = aimPawnNow ? word(aimPawnNow + kPawnController) : 0;
-            const bool want = lookAim.load(std::memory_order_relaxed) && lookAim3p.load(std::memory_order_relaxed) && headOk3 &&
-                              object(pc) && left_trigger_held(); // third person: only while aiming, always
-            if (want) pairAimed = state_drive(pc, headQ);
-            else state_release("left trigger released");
+            const bool full = lookAim.load(std::memory_order_relaxed) && lookAim3p.load(std::memory_order_relaxed) && left_trigger_held();
+            const bool look = !full && lookTargets.load(std::memory_order_relaxed); // LOOKSTEER
+            pairFull = false;
+            if ((full || look) && headOk3 && object(pc)) {
+                pairAimed = state_drive(pc, headQ, full, lookYaw.load(std::memory_order_relaxed));
+                pairFull = pairAimed && full;
+            } else state_release("left trigger released");
             const ULONGLONG now = GetTickCount64();
             tpComp = false;
             if (pairAimed) { memcpy(tpBody, pairBody, sizeof tpBody); tpCompUntil = now + 1500; tpComp = true; }
@@ -566,9 +615,26 @@ void apply(float view[4][4], float unitsPerMetre, const float headQ[4], bool fir
                     else tpComp = true;
                 }
             } else tpCompUntil = 0;
+            if (!tpComp) tpOffsetValid = false;
             if (tpComp) { // where the camera would be for the body's direction: its offset in its own frame, laid along the body
                 float loc[3];
                 for (int j = 0; j < 3; ++j) loc[j] = (o[0] - eye[0]) * view[0][j] + (o[1] - eye[1]) * view[1][j] + (o[2] - eye[2]) * view[2][j];
+                // ZOOMFOLLOW: the game's own zoom / close camera is followed, never held
+                const float dist = sqrtf(loc[0] * loc[0] + loc[1] * loc[1] + loc[2] * loc[2]) / (unitsPerMetre > 1 ? unitsPerMetre : 90.0f);
+                const bool zoomed = gameM00 > 0 && normalM00 > 0 && gameM00 > normalM00 * 1.12f;
+                const bool follow = dist < 1.1f || zoomed;
+                if (follow != zoomFollow) {
+                    zoomFollow = follow;
+                    if (zoomLogs++ < 30)
+                        BVR_LOG("[bo] ZOOMFOLLOW: game camera %s (%.2f m from his eyes, lens %.3f vs usual %.3f)%s",
+                                follow ? "zoomed / close - the view follows it" : "back to normal", dist, gameM00, normalM00,
+                                follow ? "" : " - camera distance held while the head looks around again");
+                }
+                if (pairAimed && !pairFull && !follow) { // LOOKSTEER: the boom as it is for the body's own direction
+                    const float dotF = view[0][2] * tpBody[0][2] + view[1][2] * tpBody[1][2] + view[2][2] * tpBody[2][2];
+                    if (dotF > 0.9962f || !tpOffsetValid) { memcpy(tpOffset, loc, sizeof loc); tpOffsetValid = true; } // 5 deg
+                    else memcpy(loc, tpOffset, sizeof loc);
+                } else tpOffsetValid = false; // aiming / the game's zoom: the game's own boom
                 for (int i = 0; i < 3; ++i) tpPos[i] = eye[i] + loc[0] * tpBody[i][0] + loc[1] * tpBody[i][1] + loc[2] * tpBody[i][2];
                 tpPairs.fetch_add(1, std::memory_order_relaxed);
             }
@@ -591,10 +657,16 @@ void apply(float view[4][4], float unitsPerMetre, const float headQ[4], bool fir
     if (firstEye) { // AIMSTATE once per pair; LOOKFWD from the look this pair is drawn with
         pairAimed = false;
         const uintptr_t pc = aimPawnNow ? word(aimPawnNow + kPawnController) : 0;
-        const bool want = lookAim.load(std::memory_order_relaxed) && headOk && object(pc) &&
+        const bool full = lookAim.load(std::memory_order_relaxed) &&
                           (aimMode.load(std::memory_order_relaxed) == 0 || left_trigger_held());
-        if (want) pairAimed = state_drive(pc, headQ);
-        else state_release(!lookAim.load(std::memory_order_relaxed) ? "head aim off" : "left trigger released");
+        const bool look = !full && lookTargets.load(std::memory_order_relaxed); // LOOKSTEER
+        pairFull = false;
+        tpOffsetValid = false;
+        if ((full || look) && headOk && object(pc)) {
+            pairAimed = state_drive(pc, headQ, full, lookYaw.load(std::memory_order_relaxed));
+            pairFull = pairAimed && full;
+        } else state_release(!lookAim.load(std::memory_order_relaxed) && !lookTargets.load(std::memory_order_relaxed)
+                                 ? "head aim off" : "left trigger released");
     }
     if (pairAimed) for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) view[i][j] = pairBody[i][j];
     if (firstEye) {
@@ -634,6 +706,14 @@ bool clamp_eye(float o[3], float unitsPerMetre) {
 
 bool left_trigger_now() { return left_trigger_held(); }
 
+void note_game_lens(float m00) { // ZOOMFOLLOW: game thread, each pass before apply
+    if (!(m00 > 0.0f) || !std::isfinite(m00)) return;
+    gameM00 = m00;
+    // the usual lens = the widest seen, creeping back up over ~10 s so a lasting change of the game's FOV becomes the new usual
+    if (!(normalM00 > 0.0f) || m00 < normalM00) normalM00 = m00;
+    else normalM00 += (m00 - normalM00) * 0.0005f;
+}
+
 void aim_finder_start() { if (!findUntil.load()) { findUntil.store(GetTickCount64() + 20000); BVR_LOG("[bo] AIMFIND started from the panel (20 s)"); } }
 unsigned aim_finder_seconds_left() { const ULONGLONG u = findUntil.load(), n = GetTickCount64(); return u > n ? unsigned((u - n) / 1000) + 1 : 0; }
 
@@ -643,9 +723,19 @@ void set_on(bool v) {
 }
 void toggle() { set_on(!enabled.load()); } // both sticks clicked twice quickly (overlay thread)
 
+void draw_look_ui() { // LOOKSTEER (both views)
+    bool lt = lookTargets.load();
+    if (ImGui::Checkbox("   grapple points appear where you look  (no trigger needed)", &lt)) { lookTargets.store(lt); save(); }
+    if (lt) {
+        bool ly = lookYaw.load();
+        if (ImGui::Checkbox("      also left / right  (the stick then walks Batman where you look)", &ly)) { lookYaw.store(ly); save(); }
+        ImGui::TextDisabled("      the game camera follows your head; your view stays where the stick puts it");
+    }
+}
 void draw_ui() { // at the top of the panel: it changes the whole view (City)
     bool fp = enabled.load();
     if (ImGui::Checkbox("FIRST PERSON  (or click both sticks twice quickly)", &fp)) set_on(fp);
+    draw_look_ui();
     if (!fp) {
         bool a3 = lookAim3p.load();
         if (ImGui::Checkbox("   aim with your head while holding the left trigger (third person)", &a3)) { lookAim3p.store(a3); save(); }
